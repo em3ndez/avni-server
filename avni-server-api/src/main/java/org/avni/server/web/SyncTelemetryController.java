@@ -1,5 +1,6 @@
 package org.avni.server.web;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.SyncTelemetryRepository;
 import org.avni.server.domain.Organisation;
 import org.avni.server.domain.SyncTelemetry;
@@ -10,12 +11,12 @@ import org.joda.time.DateTime;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Pageable;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.Link;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
-import javax.transaction.Transactional;
+
 import java.util.List;
 
 @RestController
@@ -26,13 +27,6 @@ public class SyncTelemetryController implements RestControllerResourceProcessor<
     public SyncTelemetryController(SyncTelemetryRepository syncTelemetryRepository) {
         this.syncTelemetryRepository = syncTelemetryRepository;
     }
-
-    @RequestMapping(value = "syncTelemetry", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user')")
-    public PagedResources<Resource<SyncTelemetry>> getEmpty(Pageable pageable) {
-        return empty(pageable);
-    }
-
 
     @RequestMapping(value = "syncTelemetry", method = RequestMethod.POST)
     @Transactional
@@ -52,13 +46,15 @@ public class SyncTelemetryController implements RestControllerResourceProcessor<
         syncTelemetry.setAndroidVersion(request.getAndroidVersion());
         syncTelemetry.setDeviceName(request.getDeviceName());
         syncTelemetry.setDeviceInfo(request.getDeviceInfo());
+        syncTelemetry.setAppInfo(request.getAppInfo());
         syncTelemetry.setSyncSource(request.getSyncSource());
         syncTelemetryRepository.save(syncTelemetry);
     }
 
     @RequestMapping(value = "/report/syncTelemetry", method = RequestMethod.GET)
+    @Transactional(readOnly = true)
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    public PagedResources<Resource<SyncTelemetry>> getAll(@RequestParam(value = "startDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) DateTime startDate,
+    public CollectionModel<EntityModel<SyncTelemetry>> getAll(@RequestParam(value = "startDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) DateTime startDate,
                                                           @RequestParam(value = "endDate", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) DateTime endDate,
                                                           @RequestParam(value = "userIds", required = false, defaultValue = "") List<Long> userIds,
                                                           Pageable pageable) {
@@ -74,10 +70,10 @@ public class SyncTelemetryController implements RestControllerResourceProcessor<
     }
 
     @Override
-    public Resource<SyncTelemetry> process(Resource<SyncTelemetry> resource) {
+    public EntityModel<SyncTelemetry> process(EntityModel<SyncTelemetry> resource) {
         SyncTelemetry syncTelemetry = resource.getContent();
         resource.removeLinks();
-        resource.add(new Link(syncTelemetry.getUser().getName(), "userName"));
+        resource.add(Link.of(syncTelemetry.getUser().getName(), "userName"));
         return resource;
     }
 }

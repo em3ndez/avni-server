@@ -26,6 +26,12 @@ from address_level
 where o.name = ?
 order by c2.name;
 
+-- Fetch list of roles in postgres openchs DB
+SELECT usename as username FROM pg_user;
+
+-- Command to create db_user for that on local
+select create_db_user('<username>', 'password') FROM pg_user;
+
 -- ITEMS FOR TRANSLATION
 select distinct name
 from
@@ -207,6 +213,33 @@ order by
   , fe.display_order asc;
 --------------
 
+------- GET All Observation concepts of a form, for providing external API contract
+
+select
+CASE WHEN fe.is_mandatory=true THEN 'YES' ELSE 'NO' END as "Mandatory",
+c.name as Concept,
+coalesce(ca.answers, '(DataType: '||c.data_type||')') as Answers
+from form f
+         inner join form_element_group feg on feg.form_id = f.id
+         inner join form_element fe on fe.form_element_group_id = feg.id
+         inner join concept c on fe.concept_id = c.id
+         inner join organisation co on co.id = c.organisation_id
+         inner join organisation feo on feo.id = fe.organisation_id
+         left join (
+    select ca.concept_id, string_agg(a.name,E'\n' order by ca.answer_order) answers
+    from concept_answer ca inner join concept a on ca.answer_concept_id = a.id
+    where a.is_voided = false
+    group by ca.concept_id
+) ca on ca.concept_id = c.id
+         left join non_applicable_form_element rem on rem.form_element_id = fe.id and rem.is_voided <> TRUE and rem.organisation_id = ?
+where rem.id is null and f.name = ? and co.name = ? and feg.is_voided = false and fe.is_voided = false and c.is_voided = false
+order by
+    f.name
+       , feg.display_order asc
+       , fe.display_order asc;
+
+-----------
+
 -- Get all the REGISTRATION form elements and concept (without answers) for translation
 select
   f.name  as FormName
@@ -335,13 +368,54 @@ WHERE (now() - pg_stat_activity.query_start) > interval '5 minutes';
 -- See what queries are in waiting to acquire locks
 SELECT relation::regclass, * FROM pg_locks WHERE NOT GRANTED;
 
+-- Create lock_monitor and use it to find blocking PIDs
+CREATE OR REPLACE VIEW lock_monitor AS(
+                                      SELECT
+                                          COALESCE(blockingl.relation::regclass::text,blockingl.locktype) as locked_item,
+                                          now() - blockeda.query_start AS waiting_duration, blockeda.pid AS blocked_pid,
+                                          blockeda.query as blocked_query, blockedl.mode as blocked_mode,
+                                          blockinga.pid AS blocking_pid, blockinga.query as blocking_query,
+                                          blockingl.mode as blocking_mode
+                                      FROM pg_catalog.pg_locks blockedl
+                                               JOIN pg_stat_activity blockeda ON blockedl.pid = blockeda.pid
+                                               JOIN pg_catalog.pg_locks blockingl ON(
+                                              ((blockingl.transactionid = blockedl.transactionid) OR
+                                               (blockingl.relation = blockedl.relation AND
+                                                blockingl.locktype = blockedl.locktype)
+                                                  ) AND blockedl.pid != blockingl.pid)
+                                               JOIN pg_stat_activity blockinga ON blockingl.pid = blockinga.pid
+                                          AND blockinga.datid = blockeda.datid
+                                      WHERE NOT blockedl.granted
+                                        AND blockinga.datname = current_database()
+                                          );
+
+-- To show locks and blocking PIDs
+SELECT *
+from lock_monitor;
+
+-- To show locks and blocking PIDs with only id columns
+SELECT blocked_pid, blocked_mode, blocking_pid
+from lock_monitor
+order by blocking_pid asc;
+
+-- Show process details for blocking pid
+select *
+from pg_stat_activity
+where pid = '#<blocking_pid>#';
+
+-- Terminate a process
+select pg_terminate_backend('#<blocking_pid>#');
+
+-- Show process details for pid
+select *
+from pg_stat_activity;
+
 -- See number of DB Connections
 
-select max_conn,used,res_for_super,max_conn-used-res_for_super res_for_normal
-from
-    (select count(*) used from pg_stat_activity) t1,
-    (select setting::int res_for_super from pg_settings where name=$$superuser_reserved_connections$$) t2,
-    (select setting::int max_conn from pg_settings where name=$$max_connections$$) t3;
+select max_conn, used, res_for_super, max_conn - used - res_for_super res_for_normal
+from (select count(*) used from pg_stat_activity) t1,
+     (select setting::int res_for_super from pg_settings where name = $$superuser_reserved_connections$$) t2,
+     (select setting::int max_conn from pg_settings where name = $$max_connections$$) t3;
 
 -- Group open db connections by backend name
 SELECT datname, numbackends FROM pg_stat_database;
@@ -354,7 +428,8 @@ select pid as process_id,
        application_name,
        backend_start,
        state,
-       state_change
+       state_change,
+       query
 from pg_stat_activity;
 
 
@@ -385,12 +460,12 @@ WHERE NOT blocked_locks.GRANTED;
 
 
 -- To get Form element groups, form element,isMandatory, datatype and concept answers for form with specified id
-select form_group.name "Form element group", 
+select form_group.name "Form element group",
        group_element.name "Form element",
        concept.data_type::text "Datatype",
        (is_mandatory)::text  "Is mandatory",
         string_agg(distinct answer_concept_name,',') "Concept answers"
-       
+
 
 from form_element_group form_group
 
@@ -425,7 +500,7 @@ where fe.organisation_id = :orgId
   or fea.last_modified_by_id in (select id from users where organisation_id != :orgId and organisation_id is not null)
   or fa.last_modified_by_id in (select id from users where organisation_id != :orgId and organisation_id is not null)
   or ca.last_modified_by_id in (select id from users where organisation_id != :orgId and organisation_id is not null));
-                                
+
  --- To get a full list of locations with respect herierachies
  --- Update the type_id as per the address_level_type setup done for the org
  with state as (select address_level.title as name, id from address_level where type_id = 85 and address_level.is_voided = false),
@@ -498,92 +573,185 @@ where entity.audit_id = a.id
 
 -- Find out scheduled jobs in the system
 
-select * from
-    (select bje.job_execution_id execution_id,
-            bje.status status,
-            bje.exit_code exit_code,
-            bje.create_time create_time,
-            bje.start_time start_time,
-            bje.end_time end_time,
-            string_agg(case when bjep.key_name = 'uuid' then bjep.string_val else '' end::text, '') uuid,
-            string_agg(case when bjep.key_name = 'fileName' then bjep.string_val else '' end::text, '') fileName,
-            sum(case when bjep.key_name = 'noOfLines' then bjep.long_val else 0 end) noOfLines,
-            string_agg(case when bjep.key_name = 's3Key' then bjep.string_val else '' end::text, '') s3Key,
-            sum(case when bjep.key_name = 'userId' then bjep.long_val else 0 end) userId,
-            string_agg(case when bjep.key_name = 'type' then bjep.string_val::text else '' end::text, '') job_type,
-            max(case when bjep.key_name = 'startDate' then bjep.date_val::timestamp else null::timestamp end::timestamp) startDate,
-            max(case when bjep.key_name = 'endDate' then bjep.date_val::timestamp else null::timestamp end::timestamp) endDate,
-            string_agg(case when bjep.key_name = 'subjectTypeUUID' then bjep.string_val::text else '' end::text, '') subjectTypeUUID,
-            string_agg(case when bjep.key_name = 'programUUID' then bjep.string_val::text else '' end::text, '') programUUID,
-            string_agg(case when bjep.key_name = 'encounterTypeUUID' then bjep.string_val::text else '' end::text, '') encounterTypeUUID,
-            string_agg(case when bjep.key_name = 'reportType' then bjep.string_val::text else '' end::text, '') reportType,
-            max(bse.read_count) read_count,
-            max(bse.write_count) write_count,
-            max(bse.write_skip_count) write_skip_count
-     from batch_job_execution bje
-              left outer join  batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
-              left outer join batch_step_execution bse on bje.job_execution_id = bse.job_execution_id
-     group by bje.job_execution_id, bje.status, bje.exit_code, bje.create_time, bje.start_time, bje.end_time
-     order by bje.create_time desc) jobs;
+select *
+from (select bje.job_execution_id                                                                               execution_id,
+             bje.status                                                                                         status,
+             bje.exit_code                                                                                      exit_code,
+             bji.job_name                                                                                       "Type of Job",
+             bje.create_time                                                                                    create_time,
+             bje.start_time                                                                                     start_time,
+             bje.end_time                                                                                       end_time,
+             string_agg(case when bjep.parameter_name = 'uuid' then bjep.parameter_value else '' end::text, '') uuid,
+             string_agg(case when bjep.parameter_name = 'fileName' then bjep.parameter_value else '' end::text,
+                        '')                                                                                     fileName,
+             sum(case
+                     when bjep.parameter_name = 'noOfLines' then CAST(nullif(bjep.parameter_value, '') AS integer)
+                     else 0 end)                                                                                noOfLines,
+             string_agg(case when bjep.parameter_name = 's3Key' then bjep.parameter_value else '' end::text,
+                        '')                                                                                     s3Key,
+             sum(case
+                     when bjep.parameter_name = 'userId' then CAST(nullif(bjep.parameter_value, '') AS integer)
+                     else 0 end)                                                                                userId,
+             string_agg(case when bjep.parameter_name = 'type' then bjep.parameter_value::text else '' end::text,
+                        '')                                                                                     job_type,
+             max(case
+                     when bjep.parameter_name = 'startDate' then CAST(nullif(bjep.parameter_value, '') AS timestamp)
+                     else null::timestamp end::timestamp)                                                       startDate,
+             max(case
+                     when bjep.parameter_name = 'endDate' then CAST(nullif(bjep.parameter_value, '') AS timestamp)
+                     else null::timestamp end::timestamp)                                                       endDate,
+             string_agg(case
+                            when bjep.parameter_name = 'subjectTypeUUID' then bjep.parameter_value::text
+                            else '' end::text,
+                        '')                                                                                     subjectTypeUUID,
+             string_agg(
+                     case when bjep.parameter_name = 'programUUID' then bjep.parameter_value::text else '' end::text,
+                     '')                                                                                        programUUID,
+             string_agg(case
+                            when bjep.parameter_name = 'encounterTypeUUID' then bjep.parameter_value::text
+                            else '' end::text,
+                        '')                                                                                     encounterTypeUUID,
+             string_agg(
+                     case when bjep.parameter_name = 'reportType' then bjep.parameter_value::text else '' end::text,
+                     '')                                                                                        reportType,
+             max(bse.read_count)                                                                                read_count,
+             max(bse.write_count)                                                                               write_count,
+             max(bse.write_skip_count)                                                                          write_skip_count
+      from batch_job_execution bje
+               left outer join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
+               left outer join batch_step_execution bse on bje.job_execution_id = bse.job_execution_id
+               left join batch_job_instance bji on bji.job_instance_id = bje.job_instance_id
+      group by bje.job_execution_id, bje.status, bje.exit_code, bje.create_time, bje.start_time, bje.end_time,
+               bji.job_name
+      order by bje.create_time desc) jobs;
+
 
 -- Commands to show status of Started and Pending Background jobs that were triggered today:
 
-select users.username, jobs.* from
-    (select bje.job_execution_id execution_id,
-            bje.status status,
-            bje.exit_code exit_code,
-            bje.create_time create_time,
-            bje.start_time start_time,
-            bje.end_time end_time,
-            string_agg(case when bjep.key_name = 'uuid' then bjep.string_val else '' end::text, '') uuid,
-            string_agg(case when bjep.key_name = 'fileName' then bjep.string_val else '' end::text, '') fileName,
-            sum(case when bjep.key_name = 'noOfLines' then bjep.long_val else 0 end) noOfLines,
-            string_agg(case when bjep.key_name = 's3Key' then bjep.string_val else '' end::text, '') s3Key,
-            sum(case when bjep.key_name = 'userId' then bjep.long_val else 0 end) userId,
-            string_agg(case when bjep.key_name = 'type' then bjep.string_val::text else '' end::text, '') job_type,
-            max(case when bjep.key_name = 'startDate' then bjep.date_val::timestamp else null::timestamp end::timestamp) startDate,
-            max(case when bjep.key_name = 'endDate' then bjep.date_val::timestamp else null::timestamp end::timestamp) endDate,
-            string_agg(case when bjep.key_name = 'subjectTypeUUID' then bjep.string_val::text else '' end::text, '') subjectTypeUUID,
-            string_agg(case when bjep.key_name = 'programUUID' then bjep.string_val::text else '' end::text, '') programUUID,
-            string_agg(case when bjep.key_name = 'encounterTypeUUID' then bjep.string_val::text else '' end::text, '') encounterTypeUUID,
-            string_agg(case when bjep.key_name = 'reportType' then bjep.string_val::text else '' end::text, '') reportType,
-            max(bse.read_count) read_count,
-            max(bse.write_count) write_count,
-            max(bse.write_skip_count) write_skip_count
-     from batch_job_execution bje
-              left outer join  batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
-              left outer join batch_step_execution bse on bje.job_execution_id = bse.job_execution_id
-     group by bje.job_execution_id, bje.status, bje.exit_code, bje.create_time, bje.start_time, bje.end_time
-     order by bje.create_time desc) jobs
-        join users on users.id = jobs.userId
+select users.username, jobs.*
+from (select bje.job_execution_id                                                                                execution_id,
+             bje.status                                                                                          status,
+             bje.exit_code                                                                                       exit_code,
+             bji.job_name                                                                                        "Type of Job",
+             bje.create_time                                                                                     create_time,
+             bje.start_time                                                                                      start_time,
+             bje.end_time                                                                                        end_time,
+             string_agg(case when bjep.parameter_name = 'uuid' then bjep.parameter_value else '' end::text, '')  uuid,
+             string_agg(case when bjep.parameter_name = 'fileName' then bjep.parameter_value else '' end::text,
+                        '')                                                                                      fileName,
+             sum(case
+                     when bjep.parameter_name = 'noOfLines' then CAST(nullif(bjep.parameter_value, '') AS integer)
+                     else 0 end)                                                                                 noOfLines,
+             string_agg(case when bjep.parameter_name = 's3Key' then bjep.parameter_value else '' end::text, '') s3Key,
+             sum(case
+                     when bjep.parameter_name = 'userId' then CAST(nullif(bjep.parameter_value, '') AS integer)
+                     else 0 end)                                                                                 userId,
+             string_agg(case when bjep.parameter_name = 'type' then bjep.parameter_value::text else '' end::text,
+                        '')                                                                                      job_type,
+             max(case
+                     when bjep.parameter_name = 'startDate' then CAST(nullif(bjep.parameter_value, '') AS timestamp)
+                     else null::timestamp end::timestamp)                                                        startDate,
+             max(case
+                     when bjep.parameter_name = 'endDate' then CAST(nullif(bjep.parameter_value, '') AS timestamp)
+                     else null::timestamp end::timestamp)                                                        endDate,
+             string_agg(case
+                            when bjep.parameter_name = 'subjectTypeUUID' then bjep.parameter_value::text
+                            else '' end::text,
+                        '')                                                                                      subjectTypeUUID,
+             string_agg(case when bjep.parameter_name = 'programUUID' then bjep.parameter_value::text else '' end::text,
+                        '')                                                                                      programUUID,
+             string_agg(
+                     case
+                         when bjep.parameter_name = 'encounterTypeUUID' then bjep.parameter_value::text
+                         else '' end::text,
+                     '')                                                                                         encounterTypeUUID,
+             string_agg(case when bjep.parameter_name = 'reportType' then bjep.parameter_value::text else '' end::text,
+                        '')                                                                                      reportType,
+             max(bse.read_count)                                                                                 read_count,
+             max(bse.write_count)                                                                                write_count,
+             max(bse.write_skip_count)                                                                      write_skip_count
+      from batch_job_execution bje
+               left outer join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
+               left outer join batch_step_execution bse on bje.job_execution_id = bse.job_execution_id
+               left join batch_job_instance bji on bji.job_instance_id = bje.job_instance_id
+      group by bje.job_execution_id, bje.status, bje.exit_code, bje.create_time, bje.start_time, bje.end_time,
+               bji.job_name
+      order by bje.create_time desc) jobs
+         join users on users.id = jobs.userId
 where status in ('STARTING', 'STARTED')
   and create_time >= now()::date + interval '1m';
 
 -- Find out bundle uploads for an org
 
-select * from batch_job_execution bje
+select *from batch_job_execution bje
 inner join batch_job_instance bji on bje.job_instance_id = bji.job_instance_id
   inner join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
-   and bjep.key_name = 'organisationUUID'
-  and string_val = (select uuid from organisation where name = '')
+    and bjep.parameter_name = 'organisationUUID'
+    and parameter_value = (select uuid from organisation where name = '')
 where bji.job_name = 'importZipJob';
 
 -- Commands to forcefully terminate a Spring-Batch job
 
-select * from batch_step_execution
-where job_execution_id =12345; -- <Replace 12345 with correct job execution id>
+select *
+from batch_step_execution
+where job_execution_id = 12345; -- <Replace 12345 with correct job execution id>
 
 update batch_step_execution
-set status='FAILED', exit_code='FAILED',
+set status='FAILED',
+    exit_code='FAILED',
     exit_message = 'terminated forcefully',
-    version=version+1, end_time=now() , last_updated = now()
-where job_execution_id =12345; -- <Replace 12345 with correct job execution id>
+    version=version + 1,
+    end_time=now(),
+    last_updated = now()
+where job_execution_id = 12345; -- <Replace 12345 with correct job execution id>
 
-select * from batch_job_execution
-where job_execution_id =12345; -- <Replace 12345 with correct job execution id>
+select *
+from batch_job_execution
+where job_execution_id = 12345; -- <Replace 12345 with correct job execution id>
 
-update batch_job_execution set status='FAILED', exit_code='FAILED', version=version+1, end_time=now()
-where job_execution_id =12345; -- <Replace 12345 with correct job execution id>
+update batch_job_execution
+set status='FAILED',
+    exit_code='FAILED',
+    version=version + 1,
+    end_time=now()
+where job_execution_id = 12345;
+-- <Replace 12345 with correct job execution id>
+
+-- Commands to forcefully terminate a Spring-Batch job by uuid (use when you have uuid from the job status query)
+
+select bje.job_execution_id
+from batch_job_execution bje
+         inner join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
+where bjep.parameter_name = 'uuid'
+  and bjep.parameter_value = '<uuid>'; -- <Replace <uuid> with the job uuid>
+
+update batch_step_execution
+set status='FAILED',
+    exit_code='FAILED',
+    exit_message = 'terminated forcefully',
+    version=version + 1,
+    end_time=now(),
+    last_updated = now()
+where job_execution_id in (
+    select bje.job_execution_id
+    from batch_job_execution bje
+             inner join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
+    where bjep.parameter_name = 'uuid'
+      and bjep.parameter_value = '<uuid>' -- <Replace <uuid> with the job uuid>
+);
+
+update batch_job_execution
+set status='FAILED',
+    exit_code='FAILED',
+    version=version + 1,
+    end_time=now()
+where job_execution_id in (
+    select bje.job_execution_id
+    from batch_job_execution bje
+             inner join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
+    where bjep.parameter_name = 'uuid'
+      and bjep.parameter_value = '<uuid>' -- <Replace <uuid> with the job uuid>
+);
 
 -- To create db trigger on users table to set sync settings for a particular organisation
 CREATE OR REPLACE FUNCTION insert_sync_settings_for_rwb2023_users()
@@ -674,3 +842,360 @@ set
     last_modified_date_time = current_timestamp + interval '1 millisecond'
 where type_id = 1055 and organisation_id = 301;
 -- END
+
+
+-- Find out usages of a function in a rule. This section gives all the tables where the rule can be found
+-- START
+use openchs;
+
+select program_eligibility_check_rule, subject_summary_rule from subject_type
+where ((program_eligibility_check_rule like '%eligiblePrograms%')
+    or (subject_summary_rule like '%eligiblePrograms%'));
+
+select encounter_eligibility_check_rule
+from encounter_type where encounter_eligibility_check_rule like '%eligiblePrograms%';
+
+select enrolment_summary_rule, enrolment_eligibility_check_rule, manual_enrolment_eligibility_check_rule from program
+where (
+              (enrolment_summary_rule like '%eligiblePrograms%') or
+              (enrolment_eligibility_check_rule like '%eligiblePrograms%') or
+              (manual_enrolment_eligibility_check_rule like '%eligiblePrograms%')
+          );
+
+select decision_rule, validation_rule,
+       visit_schedule_rule, checklists_rule, task_schedule_rule
+from form
+where (
+              (decision_rule like '%eligiblePrograms%') or
+              (validation_rule like '%eligiblePrograms%') or
+              (visit_schedule_rule like '%eligiblePrograms%') or
+              (checklists_rule like '%eligiblePrograms%') or
+              (task_schedule_rule like '%eligiblePrograms%')
+          );
+
+select query from report_card
+where query like ('%eligiblePrograms%');
+-- END
+
+
+-- Find out source of a rule failure. Assume you know the rule uuid and the organisation db user
+select 'Subject Type (subject summary, program eligibility check etc)' as rule_category,
+       st.name                                                         as name,
+       null                                                            as form_element_group_name,
+       null                                                            as form_element_name
+from subject_type st
+where uuid = '{rule_uuid}'
+union all
+select 'Form element rule', f.name as name, feg.name as form_element_group_name, fe.name as form_element_name
+from form_element fe
+         inner join form_element_group feg on fe.form_element_group_id = feg.id
+         inner join form f on feg.form_id = f.id
+where fe.uuid = '{rule_uuid}'
+union all
+select 'Program (summary/eligibility etc)' as rule_category,
+       name                                as name,
+       null                                as form_element_group_name,
+       null                                as form_element_name
+from program
+where uuid = '{rule_uuid}'
+union all
+select 'Form Rule (decision, visit scheduling, validation, checklists, task schedule)' as rule_category,
+       f.name                                                                          as name,
+       null                                                                            as form_element_group_name,
+       null                                                                            as form_element_name
+from form f
+where f.uuid = '{rule_uuid}';
+
+-- Find out the size of user's(belonging to a particular user group) catchment based on the no of individuals
+select users.username, count(*)
+from individual
+         join public.virtual_catchment_address_mapping_table cam on cam.addresslevel_id = individual.address_id
+         join public.users on users.catchment_id = cam.catchment_id and users.is_voided = false
+         join public.user_group gp on  users.id = gp.user_id and group_id=681 and gp.is_voided = false
+group by 1
+order by 2 desc;
+
+-- END
+
+-- Find details of first time sync (Remember: THIS IS NOT EXHAUSTIVE)
+-- This assumes that if you have a form element to sync, it means it is your first time sync
+-- If the first time sync fails in between, this query will not catch them since we are also looking for a successful sync.
+set role apfodisha;
+
+select u.name,
+       u.username,
+       st.sync_start_time started_at,
+       round(extract(epoch from (st.sync_end_time - st.sync_start_time))/60) as minutes
+from public.sync_telemetry st
+         cross join lateral jsonb_array_elements(entity_status -> 'pull') as j
+         inner join users u on st.user_id = u.id
+where j ->> 'entity' = 'StandardReportCardType'
+  and (j ->> 'done')::numeric >= 1
+  and st.sync_source = 'manual'
+  and st.sync_status = 'complete'
+order by sync_start_time desc
+limit 100;
+
+-- Sample sql command to show observation field value for individuals
+SELECT id, uuid, observations->'2978117c-a297-4171-99c6-23c1234ca0f8'
+from individual where organisation_id = 12345;
+
+-- Sample sql command to update observation field value for individual
+update individual
+set observations = observations || '{"2978117c-a297-4171-99c6-23c1234ca0f8":"new value"}'::jsonb,
+    last_modified_date_time = now()
+where id = 1234567;
+
+--
+-- Take dump of org data
+
+pg_dump --dbname=openchs --username=openchs --role=<org_role> --file=/Users/test/prod-orgname.sql --enable-row-security --verbose --schema=public --host=localhost --port=6015 --exclude-table-data=audit --exclude-table-data='public.sync_telemetry' --exclude-table-data='rule_failure_log' --exclude-table-data='scheduled_job_run' --exclude-table-data='qrtz_*' --exclude-table-data='batch_*' openchs
+
+--
+-- Apply dump to db
+psql -U openchs --host=localhost --port=6015 -d openchs -f /Users/test/target-dump-update.sql
+
+-- to drop roles. check the oid value
+select 'drop role "' || a.rolname || '";'
+FROM pg_roles a
+WHERE pg_has_role('openchs', a.oid, 'member')
+  AND a.rolname <> 'openchs'
+  and a.oid > 1443729
+order by a.oid;
+
+
+-- START // To gain admin role option for openchs user, useful when newly creating openchs / avni_org DB
+CREATE ROLE openchs;
+
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO openchs;
+
+GRANT ALL PRIVILEGES ON DATABASE "postgres" to openchs;
+
+ALTER USER openchs WITH SUPERUSER;
+
+-- END // To gain admin role option for openchs user, useful when newly creating openchs / avni_org DB
+
+-- START //  To identify form mappings with wrong values
+select f.id              form_id,
+       f.form_type       form_type,
+       f.name            form_name,
+       f.is_voided       form_voided,
+       fm.observations_type_entity_id,
+       fm.entity_id,
+       fm.id             form_mapping_id,
+       fm.is_voided      form_mapping_voided,
+       organisation.name organisation
+from form_mapping fm
+         join form f on fm.form_id = f.id
+         join organisation on f.organisation_id = organisation.id
+where (f.form_type = 'IndividualProfile' and (entity_Id is not null or fm.observations_type_entity_id is not null))
+   or (f.form_type = 'ProgramEnrolment' and (entity_Id is null or observations_type_entity_id is not null))
+   or (f.form_type = 'ProgramExit' and (entity_Id is null or observations_type_entity_id is not null))
+   or (f.form_type = 'ProgramEncounter' and (entity_Id is null or observations_type_entity_id is null))
+   or (f.form_type = 'ProgramEncounterCancellation' and (entity_Id is null or observations_type_entity_id is null))
+   or (f.form_type = 'Encounter' and (entity_Id is not null or observations_type_entity_id is null))
+   or (f.form_type = 'IndividualEncounterCancellation' and
+       (entity_Id is not null or observations_type_entity_id is null));
+-- END //  To identify form mappings with wrong values
+
+-- update cron expression for metadata sync and cache field values
+begin transaction;
+
+select *
+from qrtz_cron_triggers
+where cron_expression <> '0 0 0 1 1 ? 2090'
+  and trigger_name like 'metabase.task.sync-and-analyze.trigger.%';
+select *
+from metabase_database
+where metadata_sync_schedule <> '0 0 0 1 1 ? 2090'
+   or cache_field_values_schedule <> '0 0 0 1 1 ? 2090';
+
+update qrtz_cron_triggers
+set cron_expression = '0 0 0 1 1 ? 2090'
+where trigger_name like 'metabase.task.sync-and-analyze.trigger.%';
+
+update metabase_database
+set metadata_sync_schedule      = '0 0 0 1 1 ? 2090',
+    cache_field_values_schedule = '0 0 0 1 1 ? 2090'
+where metadata_sync_schedule <> '0 0 0 1 1 ? 2090'
+   or cache_field_values_schedule <> '0 0 0 1 1 ? 2090';
+
+select *
+from qrtz_cron_triggers
+where cron_expression <> '0 0 0 1 1 ? 2090'
+  and trigger_name like 'metabase.task.sync-and-analyze.trigger.%';
+
+select *
+from metabase_database
+where metadata_sync_schedule <> '0 0 0 1 1 ? 2090'
+   or cache_field_values_schedule <> '0 0 0 1 1 ? 2090';
+
+commit;
+
+-- Queries to create a read-only user - START
+
+CREATE USER reporting_ro_user WITH PASSWORD '<password>';
+GRANT CONNECT ON DATABASE openchs TO reporting_ro_user;
+GRANT pg_read_all_data TO reporting_ro_user;
+
+CREATE OR REPLACE FUNCTION grant_roles_to_user(inrolname text)
+    RETURNS BIGINT AS
+$BODY$
+DECLARE
+    affected BIGINT := 0;
+    rname    text;
+BEGIN
+    FOR rname IN
+        SELECT rolname
+        FROM pg_roles
+        WHERE rolcanlogin = true
+          AND rolname NOT IN ('openchs', 'rdsadmin', 'reporting_ro_user')
+        LOOP
+            RAISE NOTICE 'Granting role % to %', inrolname, rname;
+            EXECUTE 'GRANT ' || quote_ident(rname) || ' TO ' || quote_ident(inrolname);
+            affected := affected + 1;
+        END LOOP;
+    RETURN affected;
+END
+$BODY$ LANGUAGE PLPGSQL;
+
+select grant_roles_to_user('reporting_ro_user');
+
+-- Queries to create a read-only user - END
+
+
+-- CLEAR A STUCK RESET SYNC - START
+-- Symptom: the app asks for a reset sync on every sync, even after the user has completed a full one.
+-- A row in reset_sync is created whenever a catchment changes or a subject type's sync attributes
+-- change (ResetSyncService.recordCatchmentChange / recordSyncAttributeChange). The client clears it
+-- by running the reset and marking its own copy migrated; if that does not stick, the prompt repeats.
+
+-- reset_sync has RLS (enable_rls_on_tx_table), and the policy is
+--   organisation_id = (select id from organisation where db_user = current_user)
+-- Connected as any other role you get ZERO ROWS AND NO ERROR, which reads as "nothing to clear".
+-- Check first:
+select current_user;
+
+-- 1. Look before touching anything. A row with user_id null applies to every user in the org;
+--    subject_type_id null means the reset wipes all data rather than one subject type.
+select rs.id,
+       rs.uuid,
+       u.username,
+       st.name as subject_type,
+       rs.is_voided,
+       rs.last_modified_date_time
+from reset_sync rs
+         left join users u on u.id = rs.user_id
+         left join subject_type st on st.id = rs.subject_type_id
+where rs.organisation_id = (select id from organisation where db_user = '<org_db_user>')
+order by rs.last_modified_date_time desc;
+
+-- 2. Void it. Do NOT delete.
+--    The device holds its own copy of the row with hasMigrated = false, and sync is the only way it
+--    learns anything. A deleted row simply stops being sent, so the handset never hears and keeps
+--    prompting forever. Voiding is what actually reaches it: the client reads getAllNonVoided(), so
+--    a voided row drops out of the check.
+--    Bumping last_modified_date_time is equally necessary — the client pulls this entity on a
+--    last_modified_date_time window, so without it the row never re-syncs.
+update reset_sync
+set is_voided               = true,
+    last_modified_date_time = now(),
+    version                 = version + 1
+where organisation_id = (select id from organisation where db_user = '<org_db_user>')
+  and is_voided = false
+  and (user_id is null
+    or user_id = (select id from users where username = '<username>'));
+
+-- 3. Then sync on the device. The prompt should not reappear.
+
+-- Device-side alternative, no DB access needed: clear app data and log in again.
+-- ResetSyncService.isResetSyncRequired() short-circuits when the database has never synced — and
+-- "never synced" is literally "does any Concept row exist" — so a fresh install marks every pending
+-- reset as migrated and never prompts. Costs one full sync.
+-- CLEAR A STUCK RESET SYNC - END
+
+-- MOVE METABASE ORG CONNECTIONS FROM MAIN PROD DB TO PROD READ REPLICA - START
+-- Run against the Metabase application database. Each Avni org's Metabase connection is a row in
+-- metabase_database; details is a JSON text column holding host/user/password. Metabase sometimes
+-- stores the host with a trailing dot, hence the trim.
+
+-- 1. See which connections currently point at the primary
+SELECT id, name, created_at, details::json->>'host' AS host, details::json->>'user' AS db_user,
+       metadata_sync_schedule, cache_field_values_schedule
+FROM metabase_database
+WHERE engine = 'postgres'
+  AND trim(trailing '.' from (details::json->>'host')) = 'serverdb.avniproject.org'
+ORDER BY id;
+
+-- 2. Connections whose sync schedules are NOT already disabled (see "update cron expression" section above).
+--    Expected 0; anything else would start metadata/field-value scans against the replica.
+SELECT count(*) AS rows_that_would_be_blocked
+FROM metabase_database
+WHERE engine = 'postgres'
+  AND trim(trailing '.' from (details::json->>'host')) = 'serverdb.avniproject.org'
+  AND (metadata_sync_schedule <> '0 0 0 1 1 ? 2090'
+    OR cache_field_values_schedule <> '0 0 0 1 1 ? 2090');
+
+-- 3. Back up the table. Table name is built from today's date, e.g. metabase_database_bak_20260914
+DO
+$$
+BEGIN
+    EXECUTE format('CREATE TABLE metabase_database_bak_%s AS SELECT * FROM metabase_database',
+                   to_char(now(), 'YYYYMMDD'));
+END
+$$;
+
+-- 4. Repoint the host
+UPDATE metabase_database
+SET details = jsonb_set(details::jsonb, '{host}', '"serverdb.read.avniproject.org"')::text,
+    updated_at = now()
+WHERE engine = 'postgres'
+  AND trim(trailing '.' from (details::json->>'host')) = 'serverdb.avniproject.org';
+
+-- 5. Verify: primary should no longer appear, replica count should equal step 1's row count
+SELECT trim(trailing '.' from (details::json->>'host')) AS host, count(*) AS connections
+FROM metabase_database WHERE engine = 'postgres' GROUP BY 1 ORDER BY 2 DESC;
+
+-- Rollback, if needed (replace the date with the backup table you created):
+-- UPDATE metabase_database m SET details = b.details, updated_at = now()
+-- FROM metabase_database_bak_20260914 b WHERE b.id = m.id;
+-- MOVE METABASE ORG CONNECTIONS FROM MAIN PROD DB TO PROD READ REPLICA - END
+
+
+-- DISABLE METABASE FOR AN ORG (e.g. on prerelease) - START
+-- Symptom: creating/updating a user, or adding/removing a user from a group, fails outright.
+-- Cause: four write paths call MetabaseService.upsertUsersOnMetabase() synchronously inside a
+-- transaction - UserService.createUser, UserService.updateUser, UserGroupController.addUsersToGroup
+-- and UserGroupController.removeUserFromGroup. Its first statement is
+-- MetabaseGroupRepository.findGroup(), which does not degrade gracefully: any failure reaching
+-- Metabase (connection refused, 401 on a stale METABASE_API_KEY, 502) is rethrown as a
+-- RuntimeException and rolls the whole transaction back. In addUsersToGroup the Metabase call runs
+-- before userGroupRepository.saveAll(), so the membership is never persisted at all.
+
+-- AVNI_REPORTING_METABASE_SELF_SERVICE_ENABLED=false does NOT help. That property is read only by
+-- CannedAnalyticsStatusService, where it just makes /web/metabase/status report NotEnabled. It gates
+-- none of the four write paths.
+
+-- What does gate them is the per-org metabaseSetupEnabled flag in organisation_config.settings,
+-- read via OrganisationConfigService.isMetabaseSetupEnabled().
+
+-- organisation_config is RLS scoped, so connect as the org's db_user or the update silently
+-- matches zero rows.
+set role <org_db_user>;
+
+update organisation_config
+set settings = jsonb_set(settings, '{metabaseSetupEnabled}', 'false'::jsonb, true)
+where settings ->> 'metabaseSetupEnabled' = 'true';
+
+-- Takes effect immediately - OrganisationConfigService reads the row per call, nothing is cached,
+-- no restart needed.
+
+-- This is the non-destructive option: it only breaks the link, leaving the org's Metabase group,
+-- collection and questions intact, so setup can be re-run later. Do NOT use POST /web/metabase/teardown
+-- to achieve the same thing - that also flips the flag to false, but only after
+-- MetabaseService.tearDownMetabase() has deleted the group, the collection and the database
+-- registration.
+
+-- Caveat: anyone pressing Setup in the Admin UI flips the flag back to true
+-- (CannedAnalyticsSetupTasklet), and /web/metabase/setup carries no environment-level check.
+-- DISABLE METABASE FOR AN ORG (e.g. on prerelease) - END

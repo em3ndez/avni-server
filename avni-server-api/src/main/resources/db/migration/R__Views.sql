@@ -31,6 +31,13 @@ CREATE or replace VIEW virtual_catchment_address_mapping_table AS
 SELECT *
 FROM virtual_catchment_address_mapping_table_function();
 
+DROP TRIGGER IF EXISTS delete_on_virtual_catchment_address_mapping ON virtual_catchment_address_mapping_table CASCADE;
+
+CREATE TRIGGER delete_on_virtual_catchment_address_mapping
+    INSTEAD OF DELETE
+    ON virtual_catchment_address_mapping_table
+    FOR EACH ROW
+EXECUTE FUNCTION no_op();
 
 DROP VIEW if exists address_level_type_view;
 
@@ -65,16 +72,33 @@ CREATE OR REPLACE function title_lineage_locations_function(addressId bigint)
                 lowestpoint_id integer,
                 title_lineage  text
             )
-    LANGUAGE sql
+    LANGUAGE plpgsql
     SECURITY INVOKER
 AS
 $$
-select al.id lowestpoint_id, string_agg(alevel_in_lineage.title, ', ' order by lineage.level) title_lineage
-from address_level al
-         join regexp_split_to_table(al.lineage :: text, '[.]') with ordinality lineage (point_id, level) ON TRUE
-         join address_level alevel_in_lineage on alevel_in_lineage.id = lineage.point_id :: int
-where case when addressId isnull then true else al.id = addressId end
-group by al.id
+DECLARE
+    v_lineage_ids bigint[];
+BEGIN
+    IF addressId IS NULL THEN
+        RETURN QUERY
+            select al.id lowestpoint_id, string_agg(alevel_in_lineage.title, ', ' order by lineage.level) title_lineage
+            from address_level al
+                     join regexp_split_to_table(al.lineage :: text, '[.]') with ordinality lineage (point_id, level) ON TRUE
+                     join address_level alevel_in_lineage on alevel_in_lineage.id = lineage.point_id :: int
+            group by al.id;
+    ELSE
+        SELECT string_to_array(lineage :: text, '.')::bigint[]
+        INTO v_lineage_ids
+        FROM address_level
+        WHERE id = addressId;
+
+        RETURN QUERY
+            SELECT addressId :: integer,
+                   string_agg(al.title, ', ' ORDER BY array_position(v_lineage_ids, al.id :: bigint))
+            FROM address_level al
+            WHERE al.id = ANY (v_lineage_ids);
+    END IF;
+END;
 $$;
 
 CREATE OR REPLACE VIEW title_lineage_locations_view AS
@@ -93,3 +117,12 @@ FROM (SELECT pe.individual_id,
       and pe.is_voided = false
       GROUP BY pe.individual_id, op.name, prog.colour) progralalise
 GROUP BY progralalise.individual_id;
+
+SELECT grant_all_on_views(
+               ARRAY ['address_level_type_view',
+                   'individual_program_enrolment_search_view',
+                   'title_lineage_locations_view',
+                   'virtual_catchment_address_mapping_table'],
+               a.rolname)
+FROM pg_roles a
+WHERE pg_has_role('openchs', a.oid, 'member');

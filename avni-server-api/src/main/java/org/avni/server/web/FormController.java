@@ -1,6 +1,7 @@
 package org.avni.server.web;
 
 import org.avni.server.application.*;
+import org.avni.server.builder.BuilderException;
 import org.avni.server.builder.FormBuilder;
 import org.avni.server.builder.FormBuilderException;
 import org.avni.server.dao.OperationalProgramRepository;
@@ -9,14 +10,17 @@ import org.avni.server.dao.application.FormMappingRepository;
 import org.avni.server.dao.application.FormRepository;
 import org.avni.server.domain.*;
 import org.avni.server.domain.task.TaskType;
+import org.avni.server.domain.util.EntityUtil;
 import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.projection.FormWebProjection;
 import org.avni.server.projection.IdentifierAssignmentProjection;
 import org.avni.server.service.*;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.web.request.application.FormElementContract;
+import org.avni.server.web.util.ErrorBodyBuilder;
+import org.avni.server.util.ReactAdminUtil;
 import org.avni.server.web.validation.ValidationException;
 import org.avni.server.util.BadRequestError;
-import org.avni.server.util.ReactAdminUtil;
 import org.avni.server.web.request.ConceptContract;
 import org.avni.server.web.request.FormMappingContract;
 import org.avni.server.web.request.FormatContract;
@@ -37,20 +41,26 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.projection.ProjectionFactory;
 import org.springframework.data.rest.webmvc.support.RepositoryEntityLinks;
 import org.springframework.hateoas.Link;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.persistence.criteria.Predicate;
-import javax.transaction.Transactional;
+import jakarta.persistence.criteria.Predicate;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.InvalidObjectException;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import static org.springframework.hateoas.mvc.ControllerLinkBuilder.linkTo;
-import static org.springframework.hateoas.mvc.ControllerLinkBuilder.methodOn;
+import static java.lang.String.format;
+import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.linkTo;
+import static org.springframework.hateoas.server.mvc.WebMvcLinkBuilder.methodOn;
 
 @RestController
 public class FormController implements RestControllerResourceProcessor<BasicFormDetails> {
@@ -58,14 +68,17 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
     private final FormMappingRepository formMappingRepository;
     private final FormMappingService formMappingService;
     private final FormService formService;
-    private FormRepository formRepository;
-    private ProgramRepository programRepository;
-    private OperationalProgramRepository operationalProgramRepository;
-    private RepositoryEntityLinks entityLinks;
-    private ProjectionFactory projectionFactory;
-    private UserService userService;
-    private IdentifierAssignmentService identifierAssignmentService;
+    private final FormRepository formRepository;
+    private final ProgramRepository programRepository;
+    private final OperationalProgramRepository operationalProgramRepository;
+    private final RepositoryEntityLinks entityLinks;
+    private final ProjectionFactory projectionFactory;
+    private final UserService userService;
+    private final IdentifierAssignmentService identifierAssignmentService;
     private final ConceptService conceptService;
+    private final AccessControlService accessControlService;
+    private final ErrorBodyBuilder errorBodyBuilder;
+    private final S3Service s3Service;
 
     @Autowired
     public FormController(FormRepository formRepository,
@@ -77,7 +90,7 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
                           FormMappingService formMappingService,
                           FormService formService,
                           UserService userService,
-                          IdentifierAssignmentService identifierAssignmentService, ConceptService conceptService) {
+                          IdentifierAssignmentService identifierAssignmentService, ConceptService conceptService, AccessControlService accessControlService, ErrorBodyBuilder errorBodyBuilder, S3Service s3Service) {
         this.formRepository = formRepository;
         this.programRepository = programRepository;
         this.formMappingRepository = formMappingRepository;
@@ -89,19 +102,22 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
         this.userService = userService;
         this.identifierAssignmentService = identifierAssignmentService;
         this.conceptService = conceptService;
+        this.accessControlService = accessControlService;
+        this.errorBodyBuilder = errorBodyBuilder;
+        this.s3Service = s3Service;
         logger = LoggerFactory.getLogger(this.getClass());
     }
 
     @GetMapping(value = "/web/forms")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'user')")
-    public PagedResources<Resource<BasicFormDetails>> getAllFormsWeb(
+    @Transactional(readOnly = true)
+    public CollectionModel<EntityModel<BasicFormDetails>> getAllFormsWeb(
             @RequestParam(value = "name", required = false) String name,
             @RequestParam(value = "includeVoided", required = false) boolean includeVoided,
             Pageable pageable) {
         Long organisationId = UserContextHolder.getUserContext().getOrganisation().getId();
-        Sort sortWithId = pageable.getSort().and(new Sort("id"));
+        Sort sortWithId = pageable.getSort().and(Sort.by("id"));
 
-        PageRequest pageRequest = new PageRequest(pageable.getPageNumber(), pageable.getPageSize(), sortWithId);
+        PageRequest pageRequest = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), sortWithId);
 
         Page<Form> forms = formRepository.findAll((root, query, builder) -> {
             Predicate predicate = builder.equal(root.get("organisationId"), organisationId);
@@ -132,39 +148,35 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
 
     @RequestMapping(value = "/forms", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
     public ResponseEntity<?> save(@RequestBody FormContract formRequest) {
-        logger.info(String.format("Saving form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()));
+        logger.info(format("Saving form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()));
         try {
-            formRequest.validate();
+            formService.validateForm(formRequest);
             formService.checkIfLocationConceptsHaveBeenUsed(formRequest);
             formService.saveForm(formRequest);
-        } catch (InvalidObjectException | FormBuilderException e) {
-            e.printStackTrace();
-            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (BuilderException | InvalidObjectException | FormBuilderException e) {
+            logger.error(format("Error saving form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()), e);
+            return ResponseEntity.badRequest().body(errorBodyBuilder.getErrorMessageBody(e));
         }
         return ResponseEntity.ok(null);
     }
 
     @PostMapping(value = "/web/forms")
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     public ResponseEntity createWeb(@RequestBody CreateUpdateFormRequest request) {
-        validateCreate(request);
         FormBuilder formBuilder = new FormBuilder(null);
         Form form = formBuilder
                 .withName(request.getName())
                 .withType(request.getFormType())
                 .withUUID(UUID.randomUUID().toString())
                 .build();
+        accessControlService.checkPrivilege(FormType.getPrivilegeType(form));
         formRepository.save(form);
-
         return ResponseEntity.ok(form);
     }
 
     @DeleteMapping(value = "/web/forms/{formUUID}")
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
     public ResponseEntity deleteWeb(@PathVariable String formUUID) {
         try {
             Form existingForm = formRepository.findByUuid(formUUID);
@@ -175,30 +187,25 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
                 formMappingService.createOrUpdateFormMapping(formMappingContract);
             }
             existingForm.setVoided(!existingForm.isVoided());
-            existingForm.setName(ReactAdminUtil.getVoidedName(existingForm.getName(), existingForm.getId()));
+            existingForm.setName(EntityUtil.getVoidedName(existingForm.getName(), existingForm.getId()));
+            accessControlService.checkPrivilege(FormType.getPrivilegeType(existingForm));
             formRepository.save(existingForm);
         } catch (Exception e) {
-            e.printStackTrace();
-            return ResponseEntity.badRequest().body(e.getMessage());
+            logger.error(format("Error saving form with uuid: %s", formUUID), e);
+            return ResponseEntity.badRequest().body(errorBodyBuilder.getErrorMessageBody(e));
         }
         return ResponseEntity.ok(null);
     }
 
-    private void validateCreate(CreateUpdateFormRequest request) {
-        if (formRepository.findByNameIgnoreCase(request.getName()) != null) {
-            throw new BadRequestError("Form with name %s already exists", request.getName());
-        }
-    }
-
     @PutMapping(value = "web/forms/{formUUID}/metadata")
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     public ResponseEntity updateMetadata(@RequestBody CreateUpdateFormRequest request, @PathVariable String formUUID) {
         Form form = validateUpdateMetadata(request, formUUID);
         List<FormMappingRequest> formMappingRequests = request.getFormMappings();
         form.setName(request.getName());
         form.setFormType(FormType.valueOf(request.getFormType()));
 
+        accessControlService.checkPrivilege(FormType.getPrivilegeType(form));
         formRepository.save(form);
         formMappingRequests.forEach(formMappingRequest -> {
             FormMappingContract formMappingContract = new FormMappingContract();
@@ -215,53 +222,66 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
         return ResponseEntity.ok(null);
     }
 
+    /**
+     * Local to this controller rather than changing ErrorInterceptors, which builds a ValidationException's
+     * body with getErrorBody - a full Java stack trace, or an empty string where
+     * avni.exception.in.response is off. Either way the message never reaches App Designer, which is the
+     * whole point of raising one.
+     *
+     * {message: ...} is what ProgramController and the rest of the admin endpoints already return, and what
+     * the webapp reads.
+     *
+     * An @ExceptionHandler rather than a try/catch inside updateMetadata: that method is @Transactional, so
+     * swallowing the exception in its body would commit the form's name and type while the mapping that
+     * failed was rolled back. Letting it propagate rolls the transaction back first, then this formats it.
+     */
+    @ExceptionHandler(ValidationException.class)
+    public ResponseEntity<Object> validationFailed(ValidationException e) {
+        return ResponseEntity.badRequest().body(ReactAdminUtil.generateJsonError(e.getMessage()));
+    }
+
     private Form validateUpdateMetadata(CreateUpdateFormRequest request, String requestUUID) {
         Form byUuid = formRepository.findByUuid(requestUUID);
         if (byUuid == null) {
             throw new BadRequestError("Form with uuid %s does not exist", requestUUID);
-        }
-        Form byName = formRepository.findByNameIgnoreCase(request.getName());
-        if (byName != null && !byName.getUuid().equals(requestUUID)) {
-            throw new BadRequestError("Can not update form name to %s because form by that name already exists", request.getName());
         }
         return byUuid;
     }
 
     @RequestMapping(value = "/forms", method = RequestMethod.PATCH)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     public ResponseEntity<?> patch(@RequestBody FormContract formRequest) {
-        logger.info(String.format("Patching form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()));
+        logger.info(format("Patching form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()));
         try {
             formService.saveForm(formRequest);
-        } catch (FormBuilderException e) {
-            e.printStackTrace();
-            return ResponseEntity.badRequest().body(e.getMessage());
+        } catch (BuilderException | FormBuilderException e) {
+            logger.info(format("Error patching form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()), e);
+            return ResponseEntity.badRequest().body(errorBodyBuilder.getErrorMessageBody(e));
         }
         return ResponseEntity.ok(null);
     }
 
     @RequestMapping(value = "/forms", method = RequestMethod.DELETE)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     public ResponseEntity<?> remove(@RequestBody FormContract formRequest) {
-        logger.info(String.format("Deleting from form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()));
+        logger.info(format("Deleting from form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()));
         try {
             Organisation organisation = UserContextHolder.getUserContext().getOrganisation();
             Form existingForm = formRepository.findByUuid(formRequest.getUuid());
             FormBuilder formBuilder = new FormBuilder(existingForm);
             Form form = formBuilder.withoutFormElements(organisation, formRequest.getFormElementGroups())
                     .build();
+            accessControlService.checkPrivilege(FormType.getPrivilegeType(form));
             formRepository.save(form);
         } catch (FormBuilderException e) {
-            e.printStackTrace();
-            return ResponseEntity.badRequest().body(e.getMessage());
+            logger.error(format("Error deleting from form: %s, with UUID: %s", formRequest.getName(), formRequest.getUuid()), e);
+            return ResponseEntity.badRequest().body(errorBodyBuilder.getErrorMessageBody(e));
         }
         return ResponseEntity.ok(null);
     }
 
     @RequestMapping(value = "/forms/export", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
+    @Transactional(readOnly = true)
     public FormContract export(@RequestParam String formUUID) {
         Form form = formRepository.findByUuid(formUUID);
 
@@ -271,10 +291,14 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
         formContract.setCreatedDateTime(form.getCreatedDateTime());
         formContract.setModifiedDateTime(form.getLastModifiedDateTime());
         formContract.setDecisionRule(form.getDecisionRule());
+        formContract.setEditFormRule(form.getEditFormRule());
         formContract.setVisitScheduleRule(form.getVisitScheduleRule());
         formContract.setTaskScheduleRule(form.getTaskScheduleRule());
         formContract.setValidationRule(form.getValidationRule());
         formContract.setChecklistsRule(form.getChecklistsRule());
+        formContract.setShareRule(form.getShareRule());
+        formContract.setShareTemplateS3Key(form.getShareTemplateS3Key());
+        formContract.setShareTranslations(form.getShareTranslations());
         formContract.setOrganisationId(form.getOrganisationId());
         form.getDecisionConcepts().forEach(concept -> {
             ConceptContract conceptContract = new ConceptContract();
@@ -296,7 +320,6 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
 
         form.getFormElementGroups().stream().sorted(Comparator.comparingDouble(FormElementGroup::getDisplayOrder)).forEach(formElementGroup -> {
             FormElementGroupContract formElementGroupContract = new FormElementGroupContract(formElementGroup.getUuid(), formElementGroup.getName(), formElementGroup.getDisplayOrder());
-            formElementGroupContract.setDisplay(formElementGroup.getDisplay());
             formElementGroupContract.setVoided(formElementGroup.isVoided());
             formElementGroupContract.setOrganisationId(formElementGroup.getOrganisationId());
             formElementGroupContract.setRule(formElementGroup.getRule());
@@ -373,11 +396,11 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
      * </ol>
      */
     @RequestMapping(value = "/forms/program/{programId}", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'user')")
+    @Transactional(readOnly = true)
     public List<BasicFormDetails> getForms(@PathVariable("programId") Long programId, Pageable pageable) {
         Program program = programRepository.findOne(programId);
         if (program == null) {
-            throw new ValidationException(String.format("No program found for ID %s", programId));
+            throw new ValidationException(format("No program found for ID %s", programId));
         }
         return getFormsByProgram(program, pageable);
     }
@@ -389,11 +412,11 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
             Form form = fm.getForm();
             BasicFormDetails formDetail = new BasicFormDetails(form, program.getOperationalProgramName());
             formDetail.add(linkTo(methodOn(FormController.class).getForms(programId, pageable)).withSelfRel());
-            Link formLink = entityLinks.linkToSingleResource(Form.class, form.getId());
+            Link formLink = entityLinks.linkToItemResource(Form.class, form.getId());
             formDetail.add(formLink);
-            formDetail.add(new Link(formLink.getHref() + "/formElementGroups", "formElementGroups"));
-            formDetail.add(entityLinks.linkToSingleResource(User.class, form.getCreatedBy().getId()).withRel("createdBy"));
-            formDetail.add(entityLinks.linkToSingleResource(User.class, form.getLastModifiedBy().getId()).withRel("lastModifiedBy"));
+            formDetail.add(Link.of(formLink.getHref() + "/formElementGroups", "formElementGroups"));
+            formDetail.add(entityLinks.linkToItemResource(User.class, form.getCreatedBy().getId()).withRel("createdBy"));
+            formDetail.add(entityLinks.linkToItemResource(User.class, form.getLastModifiedBy().getId()).withRel("lastModifiedBy"));
             return formDetail;
         }).collect(Collectors.toList());
     }
@@ -417,7 +440,7 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
      * @return list of program/forms
      */
     @RequestMapping(value = "/forms", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'user')")
+    @Transactional(readOnly = true)
     public List<Map<String, Object>> getForms(Pageable pageable) {
 
         Iterable<OperationalProgram> programItr = operationalProgramRepository.findAllByIsVoidedFalse();
@@ -438,14 +461,13 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
     }
 
     @GetMapping(value = "/web/form/{uuid}")
-    @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public FormWebProjection getFormForWeb(@PathVariable String uuid) {
         return projectionFactory.createProjection(FormWebProjection.class, formRepository.findByUuid(uuid));
     }
 
     @GetMapping(value = "/web/form/{uuid}/identifierAssignments")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'user')")
     @ResponseBody
     public List<IdentifierAssignmentProjection> getFormIdentifiers(@PathVariable String uuid) {
         try {
@@ -458,8 +480,38 @@ public class FormController implements RestControllerResourceProcessor<BasicForm
                     .map(identifierAssignment -> projectionFactory.createProjection(IdentifierAssignmentProjection.class, identifierAssignment))
                     .collect(Collectors.toList());
         } catch (Exception e) {
-            logger.error(e.getMessage());
+            logger.error(e.getMessage(), e);
             throw e;
+        }
+    }
+
+    @PostMapping(value = "/web/form/{uuid}/uploadShareTemplate")
+    @ResponseBody
+    @Transactional
+    public ResponseEntity<?> uploadShareTemplate(@PathVariable String uuid, @RequestPart("file") MultipartFile file) {
+        try {
+            accessControlService.checkPrivilege(FormType.getPrivilegeType(formRepository.findByUuid(uuid)));
+            String s3Key = formService.uploadShareTemplate(uuid, file);
+            return ResponseEntity.ok(s3Key);
+        } catch (BadRequestError e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+        } catch (IOException e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(e.getMessage());
+        }
+    }
+
+    @RequestMapping(value = "/formShareTemplateFile/{fileName:.+}", method = RequestMethod.GET)
+    @Transactional(readOnly = true)
+    public ResponseEntity<?> serveFormShareTemplateFile(@PathVariable String fileName) {
+        Organisation organisation = UserContextHolder.getOrganisation();
+        if (organisation == null) return ResponseEntity.status(HttpStatus.BAD_REQUEST).build();
+        try {
+            String s3Path = format("%s/%s", FormService.FORM_SHARE_TEMPLATES_SUBDIR, fileName);
+            InputStream contentStream = s3Service.getOrgScopedContent(s3Path, organisation);
+            return ResponseEntity.ok().body(new InputStreamResource(contentStream));
+        } catch (Exception e) {
+            logger.error(format("Error serving form share template %s: %s", fileName, e.getMessage()), e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(format("Error serving %s", fileName));
         }
     }
 }

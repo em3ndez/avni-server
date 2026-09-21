@@ -1,5 +1,6 @@
 package org.avni.server.service;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.common.AbstractControllerIntegrationTest;
 import org.avni.server.domain.Individual;
 import org.junit.Before;
@@ -10,8 +11,8 @@ import org.springframework.test.context.jdbc.Sql;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @Sql(scripts = {"/test-data.sql"})
-public class IndividualServiceIntegrationTest  extends AbstractControllerIntegrationTest {
-
+@Transactional
+public class IndividualServiceIntegrationTest extends AbstractControllerIntegrationTest {
     @Autowired
     private IndividualService individualService;
 
@@ -35,8 +36,8 @@ public class IndividualServiceIntegrationTest  extends AbstractControllerIntegra
         assertThat(phoneNumber).isNull();
     }
 
-    @Test (expected = AssertionError.class)
+    @Test(expected = AssertionError.class)
     public void shouldNotAcceptNullIndividuals() {
-        String phoneNumber = individualService.findPhoneNumber((Individual) null);
+        individualService.findPhoneNumber(null);
     }
 }

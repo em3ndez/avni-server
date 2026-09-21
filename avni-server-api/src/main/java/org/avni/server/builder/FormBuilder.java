@@ -28,6 +28,11 @@ public class FormBuilder extends BaseBuilder<Form, FormBuilder> {
         return this;
     }
 
+    public FormBuilder withEditFormRule(String editFormRule) {
+        this.get().setEditFormRule(editFormRule);
+        return this;
+    }
+
     public FormBuilder withVisitScheduleRule(String visitScheduleRule) {
         this.get().setVisitScheduleRule(visitScheduleRule);
         return this;
@@ -75,6 +80,22 @@ public class FormBuilder extends BaseBuilder<Form, FormBuilder> {
         return this;
     }
 
+    public FormBuilder withShareRule(String shareRule) {
+        this.get().setShareRule(shareRule);
+        return this;
+    }
+
+    public FormBuilder withShareTemplateS3Key(String shareTemplateS3Key) {
+        this.get().setShareTemplateS3Key(shareTemplateS3Key);
+        return this;
+    }
+
+    public FormBuilder withShareTranslations(org.avni.server.domain.JsonObject shareTranslations) {
+        this.get().setShareTranslations(shareTranslations);
+        return this;
+    }
+
+
     private FormElementGroup getExistingFormElementGroup(String uuid) {
         return this.get().findFormElementGroup(uuid);
     }
@@ -89,7 +110,6 @@ public class FormBuilder extends BaseBuilder<Form, FormBuilder> {
                         .withBackgroundColour(formElementGroupContract.getBackgroundColour())
                         .withStartTime(formElementGroupContract.getStartTime())
                         .withStayTime(formElementGroupContract.getStayTime())
-                        .withDisplay(formElementGroupContract.getDisplay())
                         .withDisplayOrder(formElementGroupContract.getDisplayOrder())
                         .withRule(formElementGroupContract.getRule())
                         .withDeclarativeRule(formElementGroupContract.getDeclarativeRule())

@@ -3,249 +3,210 @@ package org.avni.server.importer.batch.csv.writer;
 import org.avni.server.application.FormMapping;
 import org.avni.server.application.FormType;
 import org.avni.server.application.Subject;
-import org.avni.server.application.projections.LocationProjection;
-import org.avni.server.dao.AddressLevelTypeRepository;
 import org.avni.server.dao.GenderRepository;
 import org.avni.server.dao.IndividualRepository;
-import org.avni.server.dao.LocationRepository;
 import org.avni.server.dao.application.FormMappingRepository;
 import org.avni.server.domain.*;
-import org.avni.server.importer.batch.csv.contract.UploadRuleServerResponseContract;
-import org.avni.server.importer.batch.csv.creator.*;
-import org.avni.server.importer.batch.csv.writer.header.SubjectHeaders;
+import org.avni.server.importer.batch.csv.creator.AddressLevelCreator;
+import org.avni.server.importer.batch.csv.creator.LocationCreator;
+import org.avni.server.importer.batch.csv.creator.ObservationCreator;
+import org.avni.server.importer.batch.csv.creator.SubjectTypeCreator;
+import org.avni.server.importer.batch.csv.writer.header.SubjectHeadersCreator;
 import org.avni.server.importer.batch.model.Row;
 import org.avni.server.service.*;
-import org.jadira.usertype.spi.utils.lang.StringUtils;
+import org.avni.server.util.ValidationUtil;
 import org.joda.time.LocalDate;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.batch.item.ItemWriter;
+import org.springframework.batch.item.Chunk;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 
-import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.function.Supplier;
-import java.util.stream.Stream;
-
 
 @Component
-public class SubjectWriter extends EntityWriter implements ItemWriter<Row>, Serializable {
-    private final AddressLevelTypeRepository addressLevelTypeRepository;
-    private final LocationRepository locationRepository;
+public class SubjectWriter extends EntityWriter {
     private final IndividualRepository individualRepository;
     private final GenderRepository genderRepository;
     private final SubjectTypeCreator subjectTypeCreator;
-    private final LocationCreator locationCreator;
     private final FormMappingRepository formMappingRepository;
-    private final ObservationService observationService;
-    private final RuleServerInvoker ruleServerInvoker;
-    private final VisitCreator visitCreator;
-    private final DecisionCreator decisionCreator;
     private final ObservationCreator observationCreator;
-    private EntityApprovalStatusService entityApprovalStatusService;
     private final IndividualService individualService;
     private final S3Service s3Service;
-    private final EntityApprovalStatusWriter entityApprovalStatusWriter;
-
-    private static final Logger logger = LoggerFactory.getLogger(SubjectWriter.class);
+    private final AddressLevelCreator addressLevelCreator;
+    private final SubjectMigrationService subjectMigrationService;
+    private final SubjectTypeService subjectTypeService;
+    private final SubjectHeadersCreator subjectHeadersCreator;
 
     @Autowired
-    public SubjectWriter(AddressLevelTypeRepository addressLevelTypeRepository,
-                         LocationRepository locationRepository,
-                         IndividualRepository individualRepository,
+    public SubjectWriter(IndividualRepository individualRepository,
                          GenderRepository genderRepository,
                          SubjectTypeCreator subjectTypeCreator,
-                         EntityApprovalStatusService entityApprovalStatusService,
                          FormMappingRepository formMappingRepository,
-                         ObservationService observationService,
-                         RuleServerInvoker ruleServerInvoker,
-                         VisitCreator visitCreator,
-                         DecisionCreator decisionCreator,
-                         ObservationCreator observationCreator, IndividualService individualService, EntityApprovalStatusWriter entityApprovalStatusWriter,
-                         AddressLevelService addressLevelService,
-                         S3Service s3Service,
-                         OrganisationConfigService organisationConfigService) {
+                         ObservationCreator observationCreator, IndividualService individualService,
+                         @Qualifier("BatchS3Service") S3Service s3Service,
+                         OrganisationConfigService organisationConfigService,
+                         AddressLevelCreator addressLevelCreator, SubjectMigrationService subjectMigrationService, SubjectTypeService subjectTypeService, SubjectHeadersCreator subjectHeadersCreator) {
         super(organisationConfigService);
-        this.addressLevelTypeRepository = addressLevelTypeRepository;
-        this.locationRepository = locationRepository;
         this.individualRepository = individualRepository;
         this.genderRepository = genderRepository;
         this.subjectTypeCreator = subjectTypeCreator;
-        this.entityApprovalStatusService = entityApprovalStatusService;
         this.formMappingRepository = formMappingRepository;
-        this.observationService = observationService;
-        this.ruleServerInvoker = ruleServerInvoker;
-        this.visitCreator = visitCreator;
-        this.decisionCreator = decisionCreator;
         this.observationCreator = observationCreator;
         this.individualService = individualService;
-        this.entityApprovalStatusWriter = entityApprovalStatusWriter;
-        this.locationCreator = new LocationCreator();
+        this.addressLevelCreator = addressLevelCreator;
+        this.subjectMigrationService = subjectMigrationService;
+        this.subjectTypeService = subjectTypeService;
         this.s3Service = s3Service;
+        this.subjectHeadersCreator = subjectHeadersCreator;
     }
 
-    @Override
-    public void write(List<? extends Row> rows) throws Exception {
-        for (Row row : rows) write(row);
-    }
-
-    private void write(Row row) throws Exception {
-        try {
-            List<AddressLevelType> locationTypes = addressLevelTypeRepository.findAllByIsVoidedFalse();
-            locationTypes.sort(Comparator.comparingDouble(AddressLevelType::getLevel).reversed());
-
-            Individual individual = getOrCreateIndividual(row);
-            List<String> allErrorMsgs = new ArrayList<>();
-
-            SubjectType subjectType = subjectTypeCreator.getSubjectType(row.get(SubjectHeaders.subjectTypeHeader), SubjectHeaders.subjectTypeHeader);
-            individual.setSubjectType(subjectType);
-            individual.setFirstName(row.get(SubjectHeaders.firstName));
-            if (subjectType.isAllowMiddleName())
-                individual.setMiddleName(row.get(SubjectHeaders.middleName));
-            individual.setLastName(row.get(SubjectHeaders.lastName));
-            setProfilePicture(subjectType, individual, row, allErrorMsgs);
-            setDateOfBirth(individual, row, allErrorMsgs);
-            individual.setDateOfBirthVerified(row.getBool(SubjectHeaders.dobVerified));
-            setRegistrationDate(individual, row, allErrorMsgs);
-            individual.setRegistrationLocation(locationCreator.getLocation(row, SubjectHeaders.registrationLocation, allErrorMsgs));
-            setAddressLevel(individual, row, locationTypes, allErrorMsgs);
-            if (individual.getSubjectType().getType().equals(Subject.Person)) setGender(individual, row);
-            FormMapping formMapping = formMappingRepository.getRegistrationFormMapping(subjectType);
-            individual.setVoided(false);
-            individual.assignUUIDIfRequired();
-            if (formMapping == null) {
-                throw new Exception(String.format("No form found for the subject type %s", subjectType.getName()));
-            }
-            Individual savedIndividual;
-            if (skipRuleExecution()) {
-                SubjectHeaders subjectHeaders = new SubjectHeaders(subjectType);
-                individual.setObservations(observationCreator.getObservations(row, subjectHeaders, allErrorMsgs, FormType.IndividualProfile, individual.getObservations()));
-                savedIndividual = individualService.save(individual);
-            } else {
-                UploadRuleServerResponseContract ruleResponse = ruleServerInvoker.getRuleServerResult(row, formMapping.getForm(), individual, allErrorMsgs);
-                individual.setObservations(observationService.createObservations(ruleResponse.getObservations()));
-                decisionCreator.addRegistrationDecisions(individual.getObservations(), ruleResponse.getDecisions());
-                savedIndividual = individualService.save(individual);
-                visitCreator.saveScheduledVisits(formMapping.getType(), savedIndividual.getUuid(), null, ruleResponse.getVisitSchedules(), null);
-            }
-            entityApprovalStatusWriter.saveStatus(formMapping, savedIndividual.getId(), EntityApprovalStatus.EntityType.Subject, savedIndividual.getSubjectType().getUuid());
-        } catch (Exception e) {
-            logger.warn("Error in writing row", e);
-            throw e;
+    public void write(Chunk<? extends Row> chunk, String type, String locationHierarchy) throws Exception {
+        List<? extends Row> rows = chunk.getItems();
+        if (!CollectionUtils.isEmpty(rows)) {
+            for (Row row : rows) write(row, type, locationHierarchy);
         }
+    }
+
+    private void write(Row row, String type, String locationHierarchy) throws Exception {
+        List<String> allErrorMsgs = new ArrayList<>();
+        String id = row.get(SubjectHeadersCreator.id);
+        if (!(id == null || id.trim().isEmpty())) {
+            if (individualRepository.findByLegacyIdOrUuid(id) != null) {
+                allErrorMsgs.add(String.format("Entry with id from previous system, %s already present in Avni", id));
+                ValidationUtil.handleErrors(allErrorMsgs);
+            }
+        }
+        Individual individual = createNewIndividual(id);
+        AddressLevel oldAddressLevel = individual.getAddressLevel();
+        ObservationCollection oldObservations = individual.getObservations();
+
+        SubjectType subjectType = setSubjectType(row, individual, allErrorMsgs, type);
+        ValidationUtil.handleErrors(allErrorMsgs);
+
+        FormMapping formMapping = formMappingRepository.getRegistrationFormMapping(subjectType);
+        if (formMapping == null) {
+            throw new RuntimeException(String.format("No form found for the subject type %s", subjectType.getName()));
+        }
+        TxnDataHeaderValidator.validateHeaders(row.getHeaders(), formMapping, subjectHeadersCreator, locationHierarchy, allErrorMsgs);
+        ValidationUtil.handleErrors(allErrorMsgs);
+
+        setFirstName(row, individual, allErrorMsgs);
+        if (subjectType.isAllowMiddleName())
+            individual.setMiddleName(row.get(SubjectHeadersCreator.middleName));
+        individual.setLastName(row.get(SubjectHeadersCreator.lastName));
+        setProfilePicture(subjectType, individual, row, allErrorMsgs);
+        if (subjectType.isPerson())
+            setDateOfBirth(individual, row, allErrorMsgs);
+        Boolean dobVerified = row.getBool(SubjectHeadersCreator.dobVerified);
+        individual.setDateOfBirthVerified(dobVerified != null ? dobVerified : false);
+        setRegistrationDate(individual, row, allErrorMsgs);
+
+        LocationCreator locationCreator = new LocationCreator();
+        individual.setRegistrationLocation(locationCreator.getGeoLocation(row, SubjectHeadersCreator.registrationCoordinates, allErrorMsgs));
+
+        AddressLevelTypes registrationLocationTypes = subjectTypeService.getRegistrableLocationTypes(subjectType);
+        setAddressLevel(row, individual, registrationLocationTypes, allErrorMsgs);
+
+        if (individual.getSubjectType().getType().equals(Subject.Person))
+            setGender(individual, row, allErrorMsgs);
+        individual.setVoided(false);
+        individual.assignUUIDIfRequired();
+        ObservationCollection observations = observationCreator.getObservations(row, subjectHeadersCreator, allErrorMsgs, FormType.IndividualProfile, individual.getObservations(), formMapping);
+        ValidationUtil.handleErrors(allErrorMsgs);
+        individual.setObservations(observations);
+        Individual savedIndividual = individualService.save(individual);
+        if (oldAddressLevel != null) {
+            subjectMigrationService.markSubjectMigrationIfRequired(savedIndividual.getUuid(), oldAddressLevel, savedIndividual.getAddressLevel(), oldObservations, savedIndividual.getObservations(), false);
+        }
+    }
+
+    private void setAddressLevel(Row row, Individual individual, AddressLevelTypes registrationLocationTypes, List<String> allErrorMsgs) {
+        try {
+            AddressLevel addressLevel = addressLevelCreator.findAddressLevel(row, registrationLocationTypes);
+            individual.setAddressLevel(addressLevel);
+        } catch (RuntimeException e) {
+            allErrorMsgs.add(e.getMessage());
+        }
+    }
+
+    private static void setFirstName(Row row, Individual individual, List<String> allErrorMsgs) {
+        String firstName = row.get(SubjectHeadersCreator.firstName);
+        if (!StringUtils.hasText(firstName)) {
+            allErrorMsgs.add(String.format("Value required for mandatory field: '%s'", SubjectHeadersCreator.firstName));
+            return;
+        }
+        individual.setFirstName(firstName);
+    }
+
+    private SubjectType setSubjectType(Row row, Individual individual, List<String> allErrorMsgs, String type) {
+        String subjectTypeChosen = type.split("---")[1];
+        String subjectTypeValue = row.get(SubjectHeadersCreator.subjectTypeHeader);
+        SubjectType subjectType = subjectTypeCreator.getSubjectType(subjectTypeValue, SubjectHeadersCreator.subjectTypeHeader);
+        if (subjectType == null) {
+            allErrorMsgs.add(String.format("Invalid or missing '%s' %s", SubjectHeadersCreator.subjectTypeHeader, subjectTypeValue));
+            return null;
+        } else if (!subjectTypeChosen.equalsIgnoreCase(subjectType.getName())) {
+            allErrorMsgs.add("Upload file type chosen to upload does not match with the subject type provided in the file");
+            return null;
+        }
+        individual.setSubjectType(subjectType);
+        return subjectType;
     }
 
     private void setProfilePicture(SubjectType subjectType, Individual individual, Row row, List<String> errorMsgs) {
         try {
-            String profilePicUrl = row.get(SubjectHeaders.profilePicture);
-            if(StringUtils.isNotEmpty(profilePicUrl) && subjectType.isAllowProfilePicture()) {
+            String profilePicUrl = row.get(SubjectHeadersCreator.profilePicture);
+            if (!StringUtils.isEmpty(profilePicUrl) && subjectType.isAllowProfilePicture()) {
                 individual.setProfilePicture(s3Service
                         .uploadProfilePic(profilePicUrl, null));
-            } else if(StringUtils.isNotEmpty(profilePicUrl)) {
-                errorMsgs.add(String.format("Not allowed to set '%s'", SubjectHeaders.profilePicture));
+            } else if (!StringUtils.isEmpty(profilePicUrl)) {
+                errorMsgs.add(String.format("Not allowed to set '%s'", SubjectHeadersCreator.profilePicture));
             }
         } catch (Exception e) {
-            errorMsgs.add(String.format("Invalid '%s'", SubjectHeaders.profilePicture));
+            errorMsgs.add(String.format("Invalid '%s'", SubjectHeadersCreator.profilePicture));
         }
-    }
-
-    private Individual getOrCreateIndividual(Row row) {
-        String id = row.get(SubjectHeaders.id);
-        Individual existingIndividual = null;
-        if (!(id == null || id.isEmpty())) {
-            existingIndividual = individualRepository.findByLegacyIdOrUuid(id);
-        }
-        return existingIndividual == null ? createNewIndividual(id) : existingIndividual;
     }
 
     private Individual createNewIndividual(String externalId) {
         Individual individual = new Individual();
-        individual.setLegacyId(externalId);
+        if (StringUtils.hasText(externalId)) {
+            individual.setLegacyId(externalId);
+        }
+        individual.setVoided(false);
+        individual.assignUUIDIfRequired();
         return individual;
     }
 
     private void setDateOfBirth(Individual individual, Row row, List<String> errorMsgs) {
-        try {
-            String dob = row.get(SubjectHeaders.dateOfBirth);
-            if (dob != null && !dob.trim().isEmpty())
-                individual.setDateOfBirth(LocalDate.parse(dob));
-        } catch (Exception ex) {
-            errorMsgs.add(String.format("Invalid '%s'", SubjectHeaders.dateOfBirth));
+        LocalDate date = row.ensureDateIsPresentAndNotInFuture(SubjectHeadersCreator.dateOfBirth, errorMsgs);
+        if (date == null) {
+            return;
         }
+        individual.setDateOfBirth(date);
     }
 
     private void setRegistrationDate(Individual individual, Row row, List<String> errorMsgs) {
-        try {
-            String registrationDate = row.get(SubjectHeaders.registrationDate);
-            individual.setRegistrationDate(registrationDate != null && !registrationDate.trim().isEmpty() ? LocalDate.parse(registrationDate) : LocalDate.now());
-        } catch (Exception ex) {
-            errorMsgs.add(String.format("Invalid '%s'", SubjectHeaders.registrationDate));
+        LocalDate date = row.ensureDateIsPresentAndNotInFuture(SubjectHeadersCreator.registrationDate, errorMsgs);
+        if (date == null) {
+            return;
         }
+        individual.setRegistrationDate(date);
     }
 
-    private void setGender(Individual individual, Row row) throws Exception {
-        try {
-            String genderName = row.get(SubjectHeaders.gender);
-            Gender gender = genderRepository.findByNameIgnoreCase(genderName);
-            if (gender == null) {
-                throw new Exception(String.format("Invalid '%s' - '%s'", SubjectHeaders.gender, genderName));
-            }
-            individual.setGender(gender);
-        } catch (Exception ex) {
-            throw new Exception(String.format("Invalid '%s'", SubjectHeaders.gender));
+    private void setGender(Individual individual, Row row, List<String> allErrorMsgs) {
+        String genderName = row.get(SubjectHeadersCreator.gender);
+        if (!StringUtils.hasText(genderName)) {
+            allErrorMsgs.add(String.format("Value required for mandatory field: '%s'", SubjectHeadersCreator.gender));
+            return;
         }
-    }
-
-    private void setAddressLevel(Individual individual,
-                                 Row row,
-                                 List<AddressLevelType> locationTypes,
-                                 List<String> errorMsgs) {
-        try {
-            AddressLevel addressLevel;
-            AddressLevelType lowestAddressLevelType = locationTypes.get(locationTypes.size() - 1);
-
-            String lowestInputAddressLevel = row.get(lowestAddressLevelType.getName());
-            if (lowestInputAddressLevel == null)
-                throw new Exception(String.format("Missing '%s'", lowestAddressLevelType.getName()));
-
-            List<LocationProjection> locationsOfLowestAddressLevelType = locationRepository.findNonVoidedLocationsByTypeId(lowestAddressLevelType.getId());
-            Supplier<Stream<LocationProjection>> addressMatches = () ->
-                    locationsOfLowestAddressLevelType.stream()
-                            .filter(location ->
-                                    location.getTitle().toLowerCase().equals(lowestInputAddressLevel.toLowerCase()));
-
-            if (addressMatches.get().count() > 1) {
-                // filter by lineage if more than one location with same name present
-                addressLevel = getAddressLevelByLineage(row, locationTypes);
-            } else {
-                // exactly 1 or no match
-                LocationProjection locationProjection = addressMatches.get().findFirst().orElseThrow(() -> new Exception("'Address' not found"));
-                addressLevel = locationRepository.findByUuid(locationProjection.getUuid());
-            }
-            individual.setAddressLevel(addressLevel);
-        } catch (Exception ex) {
-            errorMsgs.add(ex.getMessage());
+        Gender gender = genderRepository.findByNameIgnoreCase(genderName);
+        if (gender == null) {
+            allErrorMsgs.add(String.format("Invalid '%s' %s", SubjectHeadersCreator.gender, genderName));
+            return;
         }
-    }
-
-    private AddressLevel getAddressLevelByLineage(Row row,
-                                                  List<AddressLevelType> locationTypes) throws Exception {
-        List<String> inputLocations = new ArrayList<>();
-        for (AddressLevelType addressLevelType : locationTypes) {
-            String _location = row.get(addressLevelType.getName());
-            if (_location != null)
-                inputLocations.add(_location);
-        }
-
-        if (inputLocations.size() == 0)
-            throw new Exception("Invalid address");
-
-        String lineage = String.join(", ", inputLocations);
-
-        return locationRepository.findByTitleLineageIgnoreCase(lineage)
-                .orElseThrow(() -> new Exception("'Address' not found"));
+        individual.setGender(gender);
     }
 }

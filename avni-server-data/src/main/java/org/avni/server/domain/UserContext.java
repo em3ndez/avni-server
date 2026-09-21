@@ -1,0 +1,92 @@
+package org.avni.server.domain;
+
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+
+public class UserContext {
+    private final Collection<String> roles = new HashSet<>();
+    private Organisation organisation;
+    private User user;
+    private String organisationUUID;
+    private String authToken;
+
+    public String getOrganisationUUID() {
+        return organisationUUID;
+    }
+
+    public void setOrganisationUUID(String organisationUUID) {
+        this.organisationUUID = organisationUUID;
+    }
+
+    public User getUser() {
+        return user;
+    }
+
+    public void setUser(User user) {
+        this.user = user;
+        this.addRolesToContext();
+    }
+
+    public String getUserName() {
+        User user = this.getUser();
+        return user == null ? null : user.getUsername();
+    }
+
+    private void addRolesToContext() {
+        String[] roles = this.user.getRoles();
+        Arrays.stream(roles).forEach(this::addRole);
+    }
+
+    public Collection<String> getRoles() {
+        return roles;
+    }
+
+    public UserContext addRole(String role) {
+        this.roles.add(role);
+        return this;
+    }
+
+    public Organisation getOrganisation() {
+        return organisation;
+    }
+
+    public void setOrganisation(Organisation organisation) {
+        this.organisation = organisation;
+    }
+
+    private Organisation nullSafeGetOrganisation() {
+        return organisation == null ? new Organisation() : organisation;
+    }
+
+    public String getOrganisationName() {
+        return nullSafeGetOrganisation().getName();
+    }
+
+    public Long getOrganisationId() {
+        return nullSafeGetOrganisation().getId();
+    }
+
+    public String getMediaDirectory() {
+        return nullSafeGetOrganisation().getMediaDirectory();
+    }
+
+    public String getAuthToken() {
+        return authToken;
+    }
+
+    public void setAuthToken(String authToken) {
+        this.authToken = authToken;
+    }
+
+    /**
+     * True when this session runs with RLS bypassed: an admin acting without a selected organisation.
+     * Such a session reads every org's rows (the JDBC interceptor skips SET ROLE), so it must share the
+     * isolated super-admin cache bucket rather than any real org's. Single source of truth for both the
+     * RLS-bypass decision ({@code SetOrganisationJdbcInterceptor}) and the L2 cache key
+     * ({@code AvniTenantIdentifierResolver}); they must never diverge.
+     */
+    public boolean isActingAsSuperAdmin() {
+        return user != null && user.isAdmin() && organisationUUID == null;
+    }
+}

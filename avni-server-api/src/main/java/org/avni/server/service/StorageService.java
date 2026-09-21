@@ -9,11 +9,13 @@ import com.amazonaws.services.s3.transfer.TransferManager;
 import com.amazonaws.services.s3.transfer.TransferManagerBuilder;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.FilenameUtils;
-import org.avni.server.domain.S3ExtensionFile;
 import org.avni.server.domain.Organisation;
 import org.avni.server.domain.OrganisationConfig;
+import org.avni.server.domain.MediaFolder;
+import org.avni.server.domain.S3ExtensionFile;
 import org.avni.server.domain.UserContext;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.media.MediaUrlResolver;
 import org.avni.server.util.AvniFiles;
 import org.avni.server.util.S;
 import org.avni.server.util.S3File;
@@ -25,6 +27,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.*;
+import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLConnection;
 import java.nio.file.Files;
@@ -32,6 +35,7 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.*;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static java.lang.String.format;
 
@@ -39,19 +43,20 @@ public abstract class StorageService implements S3Service {
     protected final String bucketName;
     protected final boolean s3InDev;
     protected final Regions REGION = Regions.AP_SOUTH_1;
-    protected final long EXPIRY_DURATION = Duration.ofHours(1).toMillis();
+    protected final long EXPIRY_DURATION = Duration.ofMinutes(10).toMillis();
     protected final long DOWNLOAD_EXPIRY_DURATION = Duration.ofMinutes(2).toMillis();
     protected AmazonS3 s3Client;
     protected final Pattern mediaDirPattern = Pattern.compile("^/?(?<mediaDir>[^/]+)/.+$");
     protected final Logger logger;
     protected final Boolean isDev;
-    protected final String PROFILE_PIC_DIR = "profile-pics";
+    private final List<MediaUrlResolver> mediaUrlResolvers;
 
-    protected StorageService(String bucketName, boolean s3InDev, Logger logger, Boolean isDev) {
+    protected StorageService(String bucketName, boolean s3InDev, Logger logger, Boolean isDev, List<MediaUrlResolver> mediaUrlResolvers) {
         this.bucketName = bucketName;
         this.s3InDev = s3InDev;
         this.logger = logger;
         this.isDev = isDev;
+        this.mediaUrlResolvers = mediaUrlResolvers;
         if (this.bucketName == null) {
             logger.error("Setup error. avni.bucketName should be present in properties file");
             throw new IllegalStateException("Configuration missing. S3 Bucket name not configured.");
@@ -104,8 +109,7 @@ public abstract class StorageService implements S3Service {
             exists = s3Client.doesObjectExist(bucketName, objectKey);
             logger.info(String.format("Checking for file: %s resulted in %b", objectKey, exists));
         } catch (Exception e) {
-            logger.error(String.format("Error while accessing file %s", objectKey));
-            e.printStackTrace();
+            logger.error(String.format("Error while accessing file %s", objectKey), e);
         }
         return exists;
     }
@@ -192,20 +196,33 @@ public abstract class StorageService implements S3Service {
     @Override
     public InputStream getObjectContent(String s3Key) {
         if (isDev && !s3InDev) {
+            String localFilePath = format("%s/%s", System.getProperty("java.io.tmpdir"), s3Key);
             try {
-                logger.info(format("[dev] Get file locally. '%s'", s3Key));
-                return new FileInputStream(s3Key);
+                logger.info(format("[dev] Get file locally. '%s'", localFilePath));
+                return new FileInputStream(localFilePath);
             } catch (FileNotFoundException e) {
-                e.printStackTrace();
-                logger.error(format("[dev] File not found. Assume empty. '%s'", s3Key));
+                logger.error(format("[dev] File not found. Assume empty. '%s'", localFilePath), e);
                 return new ByteArrayInputStream(new byte[]{});
             }
         }
-        return s3Client.getObject(bucketName, s3Key).getObjectContent();
+        try {
+            return s3Client.getObject(bucketName, s3Key).getObjectContent();
+        } catch (AmazonS3Exception e) {
+            logS3Error("getObjectContent", s3Key, e);
+            throw e;
+        }
+    }
+
+    // GCS's S3-interop endpoint often returns errors the SDK can't parse into errorCode (bare 403, null Request ID);
+    // the real cause (e.g. AccessDenied, SignatureDoesNotMatch) is only in the raw error-response XML. This class
+    // logs via this on the get path for all backends; GCS-backed subclasses use it on their presign/put paths.
+    protected void logS3Error(String op, String key, AmazonS3Exception e) {
+        logger.error(format("%s failed for key '%s' in bucket '%s': status=%d errorCode='%s' requestId='%s' responseXml=%s",
+                op, key, bucketName, e.getStatusCode(), e.getErrorCode(), e.getRequestId(), e.getErrorResponseXml()), e);
     }
 
     @Override
-    public InputStream getExtensionContent(String fileName, Organisation organisation) {
+    public InputStream getOrgScopedContent(String fileName, Organisation organisation) {
         String objectKey = format("%s/%s", organisation.getMediaDirectory(), fileName);
         return getObjectContent(objectKey);
     }
@@ -233,8 +250,7 @@ public abstract class StorageService implements S3Service {
             try {
                 return new FileInputStream(localFilePath);
             } catch (FileNotFoundException e) {
-                e.printStackTrace();
-                logger.error(format("[dev] File not found. Assume empty. '%s'", s3File.getPath()));
+                logger.error(format("[dev] File not found. Assume empty. '%s'", s3File.getPath()), e);
                 return new ByteArrayInputStream(new byte[]{});
             }
         }
@@ -298,17 +314,28 @@ public abstract class StorageService implements S3Service {
 
     @Override
     public void deleteOrgMedia(boolean deleteMetadata) {
-        String mediaDirectory = getOrgDirectoryName();
+        String mediaDirectoryPrefix = getOrgDirectoryName() + "/";
         if (deleteMetadata) {
-            this.deleteDirectory(mediaDirectory);
+            this.deleteDirectory(mediaDirectoryPrefix);
         } else {
-            List<String> metadataDirs = Arrays.asList("icons/", String.format("%s/", OrganisationConfig.Extension.EXTENSION_DIR));
-            String[] allKeys = getAllKeysWithPrefix(mediaDirectory);
-            String[] txKeys = Arrays.stream(allKeys)
-                    .filter(key -> metadataDirs.stream().noneMatch(key::contains))
+            Set<String> metadataFolders = MediaFolder.getMetadataFolders().stream()
+                    .map(folder -> folder.label)
+                    .collect(Collectors.toSet());
+            String[] transactionalKeys = Arrays.stream(getAllKeysWithPrefix(mediaDirectoryPrefix))
+                    .filter(key -> holdsTransactionalData(key.substring(mediaDirectoryPrefix.length()), metadataFolders))
                     .toArray(String[]::new);
-            deleteKeys(txKeys);
+            if (transactionalKeys.length > 0) {
+                deleteKeys(transactionalKeys);
+            }
         }
+    }
+
+    static boolean holdsTransactionalData(String relativePath, Set<String> metadataFolders) {
+        if (!relativePath.contains("/")) {
+            return true;
+        }
+        String subfolder = relativePath.substring(0, relativePath.indexOf('/'));
+        return !metadataFolders.contains(subfolder);
     }
 
     @Override
@@ -348,10 +375,21 @@ public abstract class StorageService implements S3Service {
     @Override
     public String putObject(String objectKey, File tempFile) {
         if (isDev && !s3InDev) {
-            logger.info(format("[dev] Save file locally. '%s'", objectKey));
-            return tempFile.getAbsolutePath();
+            try {
+                File destination = new File(format("%s/%s", System.getProperty("java.io.tmpdir"), objectKey));
+                FileUtils.forceMkdirParent(destination);
+                FileUtils.copyFile(tempFile, destination);
+                logger.info(format("[dev] Saved file locally at '%s'", destination.getAbsolutePath()));
+                return objectKey;
+            } catch (IOException e) {
+                throw new RuntimeException(format("[dev] Failed to save file locally for key '%s'", objectKey), e);
+            }
         }
-        s3Client.putObject(new PutObjectRequest(bucketName, objectKey, tempFile));
+        String mimeType = URLConnection.guessContentTypeFromName(objectKey);
+        ObjectMetadata objectMetadata = new ObjectMetadata();
+        objectMetadata.setContentType(mimeType);
+        PutObjectRequest putObjectRequest = new PutObjectRequest(bucketName, objectKey, tempFile).withMetadata(objectMetadata);
+        s3Client.putObject(putObjectRequest);
         tempFile.delete();
         return objectKey;
     }
@@ -360,10 +398,10 @@ public abstract class StorageService implements S3Service {
     public String uploadByteArray(String fileName, String extension, String objectPath, byte[] content) throws IOException {
         String mediaDirectory = getOrgDirectoryName();
         String objectKey = format("%s/%s/%s.%s", mediaDirectory, objectPath, fileName, extension);
-        return uploadByteArray(fileName, extension, content, objectKey);
+        return uploadByteArrayUsingObjectKey(fileName, extension, content, objectKey);
     }
 
-    public String uploadByteArray(String fileName, String extension, byte[] content, String objectKey) throws IOException {
+    public String uploadByteArrayUsingObjectKey(String fileName, String extension, byte[] content, String objectKey) throws IOException {
         File tempFile = File.createTempFile(fileName, extension);
         FileOutputStream fos = new FileOutputStream(tempFile);
         fos.write(content);
@@ -375,7 +413,7 @@ public abstract class StorageService implements S3Service {
     public String uploadInOrganisation(String filePath, byte[] content) throws IOException {
         String mediaDirectory = getOrgDirectoryName();
         String objectKey = format("%s/%s", mediaDirectory, filePath);
-        return uploadByteArray(filePath, "", content, objectKey);
+        return uploadByteArrayUsingObjectKey(filePath, "", content, objectKey);
     }
 
     @Override
@@ -400,7 +438,7 @@ public abstract class StorageService implements S3Service {
 
     @Override
     public String uploadProfilePic(String profilePicURL, Object oldValue) throws Exception {
-        return this.uploadMediaFileInDir(PROFILE_PIC_DIR, profilePicURL, oldValue);
+        return this.uploadMediaFileInDir(MediaFolder.PROFILE_PICS.label, profilePicURL, oldValue);
     }
 
     @Override
@@ -423,10 +461,15 @@ public abstract class StorageService implements S3Service {
 
     @Override
     public File downloadExternalFile(String mediaURL) {
+        String resolvedUrl = applyMediaUrlResolvers(mediaURL);
         try {
-            URLConnection connection = new URL(mediaURL).openConnection();
-            connection.setConnectTimeout(5000);
-            connection.setReadTimeout(5000);
+            HttpURLConnection connection = openWithRedirects(resolvedUrl, 5);
+
+            String contentType = connection.getContentType();
+            if (contentType != null && contentType.toLowerCase().startsWith("text/html")) {
+                throw new IOException(format("Received HTML response for '%s'; source may require confirmation (e.g. Google Drive virus-scan interstitial for large files)", mediaURL));
+            }
+
             InputStream input = connection.getInputStream();
 
             String contentDisposition = connection.getHeaderField("Content-Disposition");
@@ -450,5 +493,38 @@ public abstract class StorageService implements S3Service {
     @Override
     public boolean isInternalUrl(String url) {
         return url.startsWith(this.s3Client.getUrl(this.bucketName, "").toString());
+    }
+
+    private String applyMediaUrlResolvers(String url) {
+        if (mediaUrlResolvers == null) return url;
+        for (MediaUrlResolver resolver : mediaUrlResolvers) {
+            Optional<String> resolved = resolver.resolve(url);
+            if (resolved.isPresent()) return resolved.get();
+        }
+        return url;
+    }
+
+    private HttpURLConnection openWithRedirects(String url, int maxHops) throws IOException {
+        String current = url;
+        logger.info("Opening connection to '{}' (max {} redirects)", url, maxHops);
+        for (int i = 0; i < maxHops; i++) {
+            HttpURLConnection connection = (HttpURLConnection) new URL(current).openConnection();
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            connection.setInstanceFollowRedirects(false);
+            int status = connection.getResponseCode();
+            if (status >= 300 && status < 400) {
+                String location = connection.getHeaderField("Location");
+                connection.disconnect();
+                if (location == null) throw new IOException(format("Redirect from '%s' had no Location header", current));
+                String next = new URL(new URL(current), location).toString();
+                logger.info("Following redirect [{}] hop {}/{}: '{}' -> '{}'", status, i + 1, maxHops, current, next);
+                current = next;
+                continue;
+            }
+            logger.info("Resolved '{}' to '{}' with status {} after {} redirect(s)", url, current, status, i);
+            return connection;
+        }
+        throw new IOException(format("Too many redirects following '%s'", url));
     }
 }

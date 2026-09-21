@@ -1,21 +1,23 @@
 package org.avni.messaging.service;
 
+import org.avni.messaging.domain.MessageDeliveryStatus;
 import org.avni.messaging.domain.MessageReceiver;
 import org.avni.messaging.domain.ReceiverType;
+import org.avni.messaging.domain.exception.GlificNotConfiguredException;
 import org.avni.messaging.repository.GlificContactRepository;
 import org.avni.messaging.repository.MessageReceiverRepository;
 import org.avni.server.domain.Individual;
 import org.avni.server.domain.User;
 import org.avni.server.service.IndividualService;
 import org.avni.server.service.UserService;
+import org.avni.server.util.PhoneNumberUtil;
+import org.avni.server.util.RegionUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
-
-import static org.avni.messaging.domain.Constants.NO_OF_DIGITS_IN_INDIAN_MOBILE_NO;
 
 @Service
 public class MessageReceiverService {
@@ -46,7 +48,7 @@ public class MessageReceiverService {
     }
 
     public MessageReceiver saveReceiverIfRequired(ReceiverType receiverType, String receiverId) {
-        if(receiverType != ReceiverType.Group) return saveReceiverIfRequired(receiverType, new Long(receiverId));
+        if (receiverType != ReceiverType.Group) return saveReceiverIfRequired(receiverType, Long.parseLong(receiverId));
         Optional<MessageReceiver> messageReceiverOptional = messageReceiverRepository.findByReceiverTypeAndExternalId(receiverType, receiverId);
         return messageReceiverOptional.orElseGet(() -> {
             MessageReceiver messageReceiver = new MessageReceiver(receiverType, receiverId);
@@ -55,21 +57,27 @@ public class MessageReceiverService {
         });
     }
 
-    public MessageReceiver ensureExternalIdPresent(MessageReceiver messageReceiver) throws PhoneNumberNotAvailableOrIncorrectException {
-        if (messageReceiver.getExternalId() != null) {
-            return messageReceiver;
-        }
-
+    public MessageReceiver ensureExternalIdPresent(MessageReceiver messageReceiver) throws PhoneNumberNotAvailableOrIncorrectException, GlificNotConfiguredException {
         String phoneNumber = null, fullName = null;
-        if(messageReceiver.getReceiverType() == ReceiverType.Subject){
+        if (messageReceiver.getReceiverType() == ReceiverType.Subject) {
             Individual individual = individualService.findById(messageReceiver.getReceiverId());
             phoneNumber = individualService.findPhoneNumber(individual);
             fullName = individual.getFullName();
-        }
-        else if (messageReceiver.getReceiverType() == ReceiverType.User){
+        } else if (messageReceiver.getReceiverType() == ReceiverType.User) {
             User user = userService.findById(messageReceiver.getReceiverId()).get();
             phoneNumber = user.getPhoneNumber();
             fullName = user.getName();
+        }
+
+        if (phoneNumber == null || phoneNumber.isEmpty()) {
+            throw new PhoneNumberNotAvailableOrIncorrectException("Phone number not available for " + fullName, MessageDeliveryStatus.NotSentNoPhoneNumberInAvni);
+        }
+        if (!PhoneNumberUtil.isValidPhoneNumber(phoneNumber, RegionUtil.getCurrentUserRegion())) {
+            throw new PhoneNumberNotAvailableOrIncorrectException("Invalid phone number for " + fullName, MessageDeliveryStatus.NotSentInvalidPhoneNumberInAvni);
+        }
+
+        if (messageReceiver.getExternalId() != null) {
+            return messageReceiver;
         }
 
         String externalId = glificContactRepository.getOrCreateContact(phoneNumber, fullName);

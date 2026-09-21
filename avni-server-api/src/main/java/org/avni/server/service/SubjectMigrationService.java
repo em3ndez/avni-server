@@ -1,30 +1,53 @@
 package org.avni.server.service;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.*;
+import org.avni.server.dao.individualRelationship.IndividualRelationshipRepository;
+import org.avni.server.domain.sync.SyncEntityName;
 import org.avni.server.domain.*;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.web.IndividualController;
+import org.avni.server.web.request.BulkSubjectMigrationRequest;
 import org.joda.time.DateTime;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 
-import javax.transaction.Transactional;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 @Service
-public class SubjectMigrationService implements ScopeAwareService {
+public class SubjectMigrationService implements ScopeAwareService<SubjectMigration> {
+    private static final org.slf4j.Logger logger = LoggerFactory.getLogger(IndividualController.class);
+    private final EntityApprovalStatusRepository entityApprovalStatusRepository;
+    private final SubjectMigrationRepository subjectMigrationRepository;
+    private final SubjectTypeRepository subjectTypeRepository;
+    private final IndividualRepository individualRepository;
+    private final EncounterRepository encounterRepository;
+    private final ProgramEnrolmentRepository programEnrolmentRepository;
+    private final ProgramEncounterRepository programEncounterRepository;
+    private final GroupSubjectRepository groupSubjectRepository;
+    private final AddressLevelService addressLevelService;
+    private final ChecklistRepository checklistRepository;
+    private final ChecklistItemRepository checklistItemRepository;
+    private final IndividualRelationshipRepository individualRelationshipRepository;
+    private final AccessControlService accessControlService;
+    private final LocationRepository locationRepository;
+    private final ConceptRepository conceptRepository;
+    private final IndividualService individualService;
+    private final AvniJobRepository avniJobRepository;
 
-    private static org.slf4j.Logger logger = LoggerFactory.getLogger(IndividualController.class);
-    private EntityApprovalStatusRepository entityApprovalStatusRepository;
-    private SubjectMigrationRepository subjectMigrationRepository;
-    private SubjectTypeRepository subjectTypeRepository;
-    private IndividualRepository individualRepository;
-    private EncounterRepository encounterRepository;
-    private ProgramEnrolmentRepository programEnrolmentRepository;
-    private ProgramEncounterRepository programEncounterRepository;
-    private GroupSubjectRepository groupSubjectRepository;
-    private AddressLevelService addressLevelService;
+    public enum BulkSubjectMigrationModes {
+        byAddress,
+        bySyncConcept
+    }
+
 
     @Autowired
     public SubjectMigrationService(EntityApprovalStatusRepository entityApprovalStatusRepository,
@@ -34,7 +57,10 @@ public class SubjectMigrationService implements ScopeAwareService {
                                    EncounterRepository encounterRepository,
                                    ProgramEnrolmentRepository programEnrolmentRepository,
                                    ProgramEncounterRepository programEncounterRepository,
-                                   GroupSubjectRepository groupSubjectRepository, AddressLevelService addressLevelService) {
+                                   GroupSubjectRepository groupSubjectRepository, AddressLevelService addressLevelService,
+                                   ChecklistRepository checklistRepository,
+                                   ChecklistItemRepository checklistItemRepository,
+                                   IndividualRelationshipRepository individualRelationshipRepository, AccessControlService accessControlService, LocationRepository locationRepository, ConceptRepository conceptRepository, IndividualService individualService, AvniJobRepository avniJobRepository) {
         this.entityApprovalStatusRepository = entityApprovalStatusRepository;
         this.subjectMigrationRepository = subjectMigrationRepository;
         this.subjectTypeRepository = subjectTypeRepository;
@@ -44,10 +70,18 @@ public class SubjectMigrationService implements ScopeAwareService {
         this.programEncounterRepository = programEncounterRepository;
         this.groupSubjectRepository = groupSubjectRepository;
         this.addressLevelService = addressLevelService;
+        this.checklistRepository = checklistRepository;
+        this.checklistItemRepository = checklistItemRepository;
+        this.individualRelationshipRepository = individualRelationshipRepository;
+        this.accessControlService = accessControlService;
+        this.locationRepository = locationRepository;
+        this.conceptRepository = conceptRepository;
+        this.individualService = individualService;
+        this.avniJobRepository = avniJobRepository;
     }
 
     @Override
-    public OperatingIndividualScopeAwareRepository repository() {
+    public OperatingIndividualScopeAwareRepository<SubjectMigration> repository() {
         return subjectMigrationRepository;
     }
 
@@ -55,11 +89,33 @@ public class SubjectMigrationService implements ScopeAwareService {
     public boolean isScopeEntityChanged(DateTime lastModifiedDateTime, String subjectTypeUUID) {
         SubjectType subjectType = subjectTypeRepository.findByUuid(subjectTypeUUID);
         User user = UserContextHolder.getUserContext().getUser();
-        return subjectType != null && isChangedBySubjectTypeRegistrationLocationType(user, lastModifiedDateTime, subjectType.getId(), subjectType, SyncParameters.SyncEntityName.SubjectMigration);
+        return subjectType != null && isChangedBySubjectTypeRegistrationLocationType(user, lastModifiedDateTime, subjectType.getId(), subjectType, SyncEntityName.SubjectMigration);
     }
 
+    /**
+     * IMPORTANT: 
+     * Creates a subject migration record and updates sync attributes on related entities when address or sync concept values change.
+     * 
+     * <p>This method intentionally retrieves the individual from the database to get the current state,
+     * which may include updates made in the same transaction. When oldAddressLevel is null (typical for external API calls),
+     * it gets set to the individual's current address level, causing the migration condition to fail if the address
+     * was already updated in the same transaction. This is by design to limit migration scope for external API calls
+     * while allowing full migration for internal bulk operations.</p>
+     * 
+     * <p>Known limitation: Setting old and new sync concept values conditionally creates issues when address changes
+     * but observation values haven't changed. Values are set to null, allowing entries to be picked up by users
+     * with the same address but different sync concept values. This is illustrated in the test:
+     * {@code SubjectMigrationIntegrationTest.migrations_created_by_one_user_is_returned_for_another_user_even_when_concept_attributes_dont_match}</p>
+     * 
+     * @param individualUuid UUID of the individual subject
+     * @param oldAddressLevel Previous address level (null for external API calls)
+     * @param newAddressLevel New address level to migrate to
+     * @param oldObservations Previous observation collection (null to use current observations)
+     * @param newObservations New observation collection
+     * @param executingInBulk Whether this is part of a bulk migration operation
+     */
     @Transactional
-    public void markSubjectMigrationIfRequired(String individualUuid, AddressLevel newAddressLevel, ObservationCollection newObservations) {
+    public void markSubjectMigrationIfRequired(String individualUuid, AddressLevel oldAddressLevel, AddressLevel newAddressLevel, ObservationCollection oldObservations, ObservationCollection newObservations, boolean executingInBulk) {
         Individual individual = individualRepository.findByUuid(individualUuid);
         if (individual == null || newAddressLevel == null) {
             return;
@@ -67,12 +123,13 @@ public class SubjectMigrationService implements ScopeAwareService {
         SubjectType subjectType = individual.getSubjectType();
         String syncConcept1 = subjectType.getSyncRegistrationConcept1();
         String syncConcept2 = subjectType.getSyncRegistrationConcept2();
-        ObservationCollection oldObservations = individual.getObservations();
+        if (oldObservations == null) oldObservations = individual.getObservations();
         String oldObsSingleStringValueSyncConcept1 = oldObservations.getObjectAsSingleStringValue(syncConcept1);
         String newObsSingleStringValueSyncConcept1 = newObservations.getObjectAsSingleStringValue(syncConcept1);
         String oldObsSingleStringValueSyncConcept2 = oldObservations.getObjectAsSingleStringValue(syncConcept2);
         String newObsSingleStringValueSyncConcept2 = newObservations.getObjectAsSingleStringValue(syncConcept2);
-        if (!Objects.equals(individual.getAddressLevel().getId(), newAddressLevel.getId()) ||
+        if (oldAddressLevel == null) oldAddressLevel = individual.getAddressLevel();
+        if (!Objects.equals(oldAddressLevel.getId(), newAddressLevel.getId()) ||
                 !Objects.equals(oldObsSingleStringValueSyncConcept1, newObsSingleStringValueSyncConcept1) ||
                 !Objects.equals(oldObsSingleStringValueSyncConcept2, newObsSingleStringValueSyncConcept2)) {
             logger.info(String.format("Migrating subject with UUID %s from %s to %s", individualUuid, addressLevelService.getTitleLineage(individual.getAddressLevel()), addressLevelService.getTitleLineage(newAddressLevel)));
@@ -80,7 +137,7 @@ public class SubjectMigrationService implements ScopeAwareService {
             subjectMigration.assignUUID();
             subjectMigration.setIndividual(individual);
             subjectMigration.setSubjectType(individual.getSubjectType());
-            subjectMigration.setOldAddressLevel(individual.getAddressLevel());
+            subjectMigration.setOldAddressLevel(oldAddressLevel);
             subjectMigration.setNewAddressLevel(newAddressLevel);
             if (!Objects.equals(oldObsSingleStringValueSyncConcept1, newObsSingleStringValueSyncConcept1)) {
                 subjectMigration.setOldSyncConcept1Value(oldObsSingleStringValueSyncConcept1);
@@ -95,9 +152,146 @@ public class SubjectMigrationService implements ScopeAwareService {
             programEnrolmentRepository.updateSyncAttributesForIndividual(individual.getId(), newAddressLevel.getId(), newObsSingleStringValueSyncConcept1, newObsSingleStringValueSyncConcept2);
             programEncounterRepository.updateSyncAttributes(individual.getId(), newAddressLevel.getId(), newObsSingleStringValueSyncConcept1, newObsSingleStringValueSyncConcept2);
             groupSubjectRepository.updateSyncAttributesForGroupSubject(individual.getId(), newAddressLevel.getId(), newObsSingleStringValueSyncConcept1, newObsSingleStringValueSyncConcept2);
+            if (!executingInBulk) {
+                groupSubjectRepository.updateSyncAttributesForMemberSubject(individual.getId(), newAddressLevel.getId());
+            }
             entityApprovalStatusRepository.updateSyncAttributesForIndividual(individual.getId(), newAddressLevel.getId(), newObsSingleStringValueSyncConcept1, newObsSingleStringValueSyncConcept2);
-            groupSubjectRepository.updateSyncAttributesForMemberSubject(individual.getId(), newAddressLevel.getId());
+            checklistItemRepository.setChangedForSync(individual);
+            checklistRepository.setChangedForSync(individual);
+            individualRelationshipRepository.setChangedForSync(individual);
         }
     }
-}
 
+    @Transactional
+    public void applyRegistrationDecisionsAndPropagate(Individual individual, ObservationCollection registrationObservations) {
+        ObservationCollection oldObservations = new ObservationCollection(individual.getObservations());
+        individual.addObservations(registrationObservations);
+        markSubjectMigrationIfRequired(individual.getUuid(), individual.getAddressLevel(), individual.getAddressLevel(), oldObservations, individual.getObservations(), false);
+    }
+
+    @Transactional
+    public void changeSubjectAddressLevel(Individual subject, AddressLevel destAddressLevel) {
+        logger.info(String.format("Migrating subject : %s, address: %s -> %s", subject.getUuid(), subject.getAddressLevel().getId(), destAddressLevel.getId()));
+        this.markSubjectMigrationIfRequired(subject.getUuid(), null, destAddressLevel, null, subject.getObservations(), true);
+        subject.setAddressLevel(destAddressLevel);
+        individualService.save(subject);
+    }
+
+    @Transactional
+    public void changeSubjectSyncConceptValues(Individual subject, String destinationSyncConcept1Value, String destinationSyncConcept2Value) {
+        logger.info(String.format("Migrating subject: '%s', sync concept 1 value: '%s' -> '%s', sync concept 2 value: '%s' -> '%s'", subject.getUuid(), subject.getSyncConcept1Value(), destinationSyncConcept1Value, subject.getSyncConcept2Value(), destinationSyncConcept2Value));
+        ObservationCollection newObservations = buildSyncConceptValueObservations(subject, destinationSyncConcept1Value, destinationSyncConcept2Value);
+        this.markSubjectMigrationIfRequired(subject.getUuid(), null, subject.getAddressLevel(), null, newObservations, true);
+        subject.addObservations(newObservations);
+        individualService.save(subject);
+    }
+
+    @Transactional
+    public Map<String, String> bulkMigrate(BulkSubjectMigrationModes mode, BulkSubjectMigrationRequest bulkSubjectMigrationRequest) {
+        if (mode == BulkSubjectMigrationModes.byAddress) {
+            return bulkMigrateByAddress(bulkSubjectMigrationRequest.getSubjectIds(), bulkSubjectMigrationRequest.getDestinationAddresses());
+        } else {
+            return bulkMigrateBySyncConcept(bulkSubjectMigrationRequest.getSubjectIds(), bulkSubjectMigrationRequest.getDestinationSyncConcepts());
+        }
+    }
+
+    @Transactional
+    public Map<String, String> bulkMigrateByAddress(List<Long> subjectIds, Map<String, String> destinationAddresses) {
+        Map<String, String> migrationFailures = new HashMap<>();
+        Map<AddressLevel, AddressLevel> addressLevelMap = new HashMap<>();
+        for (Map.Entry<String, String> destinationAddressEntry : destinationAddresses.entrySet()) {
+            try {
+                Long source = Long.parseLong(destinationAddressEntry.getKey());
+                Long dest = Long.parseLong(destinationAddressEntry.getValue());
+
+                AddressLevel sourceAddressLevel = locationRepository.findOne(source);
+                AddressLevel destAddressLevel = locationRepository.findOne(dest);
+                if (sourceAddressLevel != null && destAddressLevel != null) {
+                    addressLevelMap.put(sourceAddressLevel, destAddressLevel);
+                }
+            } catch (NumberFormatException e) {
+                //Continue with other destinationAddresses
+            }
+        }
+        subjectIds.forEach(subjectId -> {
+            try {
+                Individual subject = individualRepository.findOne(subjectId);
+                if (subject == null) throw new RuntimeException("Subject not found");
+
+                accessControlService.checkSubjectPrivilege(PrivilegeType.EditSubject, subject.getSubjectType().getUuid());
+                AddressLevel destAddressLevel = addressLevelMap.get(subject.getAddressLevel());
+                if (destAddressLevel == null || destAddressLevel.isVoided()) throw new RuntimeException("Destination address level unavailable / voided");
+                this.changeSubjectAddressLevel(subject, destAddressLevel);
+            } catch (Exception e) {
+                logger.debug("Failed to migrate subject {} byAddress", subjectId);
+                migrationFailures.put(String.valueOf(subjectId), e.getMessage());
+            }
+        });
+        return migrationFailures;
+    }
+
+    @Transactional
+    public Map<String, String> bulkMigrateBySyncConcept(List<Long> subjectIds, Map<String, String> destinationSyncConcepts) {
+        Map<String, String> migrationFailures = new HashMap<>();
+        subjectIds.forEach(subjectId -> {
+            try {
+                Individual subject = individualRepository.findOne(subjectId);
+                if (subject == null) throw new RuntimeException("Subject not found");
+                accessControlService.checkSubjectPrivilege(PrivilegeType.EditSubject, subject.getSubjectType().getUuid());
+                String destinationSyncConcept1Value = validateSyncConcept(subject.getSubjectType().getSyncRegistrationConcept1(), subject.getSyncConcept1Value(), destinationSyncConcepts);
+                String destinationSyncConcept2Value = validateSyncConcept(subject.getSubjectType().getSyncRegistrationConcept2(), subject.getSyncConcept2Value(), destinationSyncConcepts);
+                if (destinationSyncConcept1Value == null && destinationSyncConcept2Value == null) {
+                    throw new RuntimeException("Valid destination sync concept(s) not found");
+                }
+                changeSubjectSyncConceptValues(subject, destinationSyncConcept1Value, destinationSyncConcept2Value);
+            } catch (Exception e) {
+                logger.debug("Failed to migrate subject {} bySyncConcept", subjectId);
+                migrationFailures.put(String.valueOf(subjectId), e.getMessage());
+            }
+        });
+        return migrationFailures;
+    }
+
+    private String validateSyncConcept(String subjectTypeSyncConceptUuid, String currentValue, Map<String, String> destinationSyncConcepts) {
+        if (subjectTypeSyncConceptUuid == null || //sync concept not configured for subject type
+                !destinationSyncConcepts.containsKey(subjectTypeSyncConceptUuid) //sync concept not included in migration
+        ) {
+            return null;
+        }
+        String destinationSyncConceptValue = destinationSyncConcepts.get(subjectTypeSyncConceptUuid);
+        if (destinationSyncConceptValue == null) {
+            return null;
+        }
+        Concept syncConcept = conceptRepository.findByUuid(subjectTypeSyncConceptUuid);
+
+        if (Objects.equals(currentValue, destinationSyncConceptValue)) {
+            throw new RuntimeException("Source value and Destination value are the same");
+        }
+
+        if (syncConcept.isCoded()) {
+            ConceptAnswer conceptAnswer = syncConcept.findConceptAnswerByConceptUUID(destinationSyncConceptValue);
+            if (conceptAnswer == null || conceptAnswer.isVoided()) {
+                throw new RuntimeException(String.format("Invalid value '%s' for coded sync concept", destinationSyncConceptValue));
+            }
+        }
+        return destinationSyncConceptValue;
+    }
+
+    private static ObservationCollection buildSyncConceptValueObservations(Individual subject, String destinationSyncConcept1Value, String destinationSyncConcept2Value) {
+        ObservationCollection newObservations = new ObservationCollection();
+        //set observation for unchanged values if sync concept exists so unchanged sync concept values are not overwritten
+        if (subject.getSubjectType().getSyncRegistrationConcept1() != null) {
+            newObservations.put(subject.getSubjectType().getSyncRegistrationConcept1(), destinationSyncConcept1Value != null ? destinationSyncConcept1Value : subject.getSyncConcept1Value());
+        }
+        if (subject.getSubjectType().getSyncRegistrationConcept2() != null) {
+            newObservations.put(subject.getSubjectType().getSyncRegistrationConcept2(), destinationSyncConcept2Value != null ? destinationSyncConcept2Value : subject.getSyncConcept2Value());
+        }
+        return newObservations;
+    }
+
+    public JobStatus getBulkSubjectMigrationJobStatus(String jobUuid) {
+        String jobFilterCondition = " and uuid = '" + jobUuid + "'";
+        Page<JobStatus> jobStatuses = avniJobRepository.getJobStatuses(UserContextHolder.getUser(), jobFilterCondition, PageRequest.of(0, 1));
+        return (jobStatuses != null && !jobStatuses.getContent().isEmpty()) ? jobStatuses.getContent().get(0) : null;
+    }
+}

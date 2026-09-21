@@ -1,5 +1,6 @@
 package org.avni.server.importer.batch.csv;
 
+import jakarta.annotation.PostConstruct;
 import org.avni.server.framework.security.AuthService;
 import org.avni.server.service.BulkUploadS3Service;
 import org.avni.server.service.ObjectInfo;
@@ -14,7 +15,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import javax.annotation.PostConstruct;
 import java.io.*;
 
 import static java.lang.String.format;
@@ -70,20 +70,19 @@ public class ErrorFileCreatorListener implements JobExecutionListener {
             writer.append('\n');
             writer.close();
         } catch (IOException e) {
-            e.printStackTrace();
+            logger.error("Unable to create temp file to record failures", e);
             throw new RuntimeException("Unable to create temp file to record failures");
         }
     }
 
     @Override
     public void afterJob(JobExecution jobExecution) {
-        logger.info(format("Bulkupload '%s'! %s", jobExecution.getStatus(), jobInfo));
+        logger.debug(format("Bulk upload '%s'! %s", jobExecution.getStatus(), jobInfo));
         try {
             ObjectInfo metadata = bulkUploadS3Service.uploadErrorFile(errorFile, uuid);
-            logger.info(format("Bulkupload '%s'! Check for errors at '%s'", jobExecution.getStatus(), metadata.getKey()));
+            logger.debug(format("Bulk upload '%s'! Check for errors at '%s'. Local file: %s", jobExecution.getStatus(), metadata.getKey(), errorFile.getAbsolutePath()));
         } catch (IOException e) {
-            e.printStackTrace();
-            logger.error("Unable to create error files in S3 {}", e.getMessage());
+            logger.error(String.format("Unable to create error files in S3 %s", e.getMessage()), e);
         }
     }
 }

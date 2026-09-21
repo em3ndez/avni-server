@@ -3,7 +3,7 @@ package org.avni.server.web.request.webapp;
 import org.avni.server.domain.OperationalProgram;
 import org.avni.server.web.contract.ProgramContract;
 import org.joda.time.DateTime;
-import org.springframework.hateoas.core.Relation;
+import org.springframework.hateoas.server.core.Relation;
 
 
 /**
@@ -71,6 +71,7 @@ public class ProgramContractWeb extends ProgramContract {
         contract.setModifiedDateTime(operationalProgram.getLastModifiedDateTime());
         contract.setEnrolmentEligibilityCheckDeclarativeRule(operationalProgram.getEnrolmentEligibilityCheckDeclarativeRule());
         contract.setManualEligibilityCheckRequired(operationalProgram.isManualEligibilityCheckRequired());
+        contract.setShowGrowthChart(operationalProgram.isShowGrowthChart());
         contract.setManualEnrolmentEligibilityCheckRule(operationalProgram.getManualEnrolmentEligibilityCheckRule());
         contract.setManualEnrolmentEligibilityCheckDeclarativeRule(operationalProgram.getManualEnrolmentEligibilityCheckDeclarativeRule());
         contract.setAllowMultipleEnrolments(operationalProgram.getProgram().isAllowMultipleEnrolments());

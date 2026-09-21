@@ -5,15 +5,21 @@ import org.avni.server.dao.EncounterTypeRepository;
 import org.avni.server.dao.ProgramEncounterRepository;
 import org.avni.server.dao.ProgramEnrolmentRepository;
 import org.avni.server.domain.*;
+import org.avni.server.domain.accessControl.PrivilegeType;
+import org.avni.server.service.ConceptService;
 import org.avni.server.service.MediaObservationService;
 import org.avni.server.service.ProgramEncounterService;
+import org.avni.server.service.UserService;
+import org.avni.server.service.accessControl.AccessControlService;
+import org.avni.server.util.S;
+import org.avni.server.util.TimeTakenLogger;
 import org.avni.server.web.request.api.ApiProgramEncounterRequest;
 import org.avni.server.web.request.api.RequestUtils;
 import org.avni.server.web.response.EncounterResponse;
 import org.avni.server.web.response.ResponsePage;
 import org.joda.time.DateTime;
-import org.avni.server.service.ConceptService;
-import org.avni.server.util.S;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -24,7 +30,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Map;
@@ -38,9 +44,12 @@ public class ProgramEncounterApiController {
     private final EncounterTypeRepository encounterTypeRepository;
     private final ProgramEncounterService programEncounterService;
     private final MediaObservationService mediaObservationService;
+    private final AccessControlService accessControlService;
+    private final UserService userService;
+    private static final Logger logger = LoggerFactory.getLogger(ProgramEncounterApiController.class);
 
     @Autowired
-    public ProgramEncounterApiController(ProgramEncounterRepository programEncounterRepository, ConceptRepository conceptRepository, ConceptService conceptService, ProgramEnrolmentRepository programEnrolmentRepository, EncounterTypeRepository encounterTypeRepository, ProgramEncounterService programEncounterService, MediaObservationService mediaObservationService) {
+    public ProgramEncounterApiController(ProgramEncounterRepository programEncounterRepository, ConceptRepository conceptRepository, ConceptService conceptService, ProgramEnrolmentRepository programEnrolmentRepository, EncounterTypeRepository encounterTypeRepository, ProgramEncounterService programEncounterService, MediaObservationService mediaObservationService, AccessControlService accessControlService, UserService userService) {
         this.programEncounterRepository = programEncounterRepository;
         this.conceptRepository = conceptRepository;
         this.conceptService = conceptService;
@@ -48,22 +57,28 @@ public class ProgramEncounterApiController {
         this.encounterTypeRepository = encounterTypeRepository;
         this.programEncounterService = programEncounterService;
         this.mediaObservationService = mediaObservationService;
+        this.accessControlService = accessControlService;
+        this.userService = userService;
     }
 
     @RequestMapping(value = "/api/programEncounters", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     public ResponsePage getEncounters(@RequestParam(name = "lastModifiedDateTime", required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
                                       @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
                                       @RequestParam(value = "encounterType", required = false) String encounterType,
                                       @RequestParam(value = "concepts", required = false) String concepts,
                                       @RequestParam(value = "programEnrolmentId", required = false) String programEnrolmentUuid,
                                       Pageable pageable) {
+        TimeTakenLogger timeTakenLogger = new TimeTakenLogger("Search program encounters", logger);
         Page<ProgramEncounter> programEncounters = programEncounterRepository.search(createSearchParams(lastModifiedDateTime, now, encounterType, concepts, programEnrolmentUuid), pageable);
+        timeTakenLogger.logInfo();
 
         ArrayList<EncounterResponse> programEncounterResponses = new ArrayList<>();
         programEncounters.forEach(programEncounter -> {
             programEncounterResponses.add(EncounterResponse.fromProgramEncounter(programEncounter, conceptRepository, conceptService));
         });
+        accessControlService.checkProgramEncounterPrivileges(PrivilegeType.ViewVisit, programEncounters.getContent());
         return new ResponsePage(programEncounterResponses, programEncounters.getNumberOfElements(), programEncounters.getTotalPages(), programEncounters.getSize());
     }
 
@@ -86,24 +101,28 @@ public class ProgramEncounterApiController {
 
     @GetMapping(value = "/api/programEncounter/{id}")
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public ResponseEntity<EncounterResponse> get(@PathVariable("id") String legacyIdOrUuid) {
         ProgramEncounter programEncounter = programEncounterRepository.findByLegacyIdOrUuid(legacyIdOrUuid);
         if (programEncounter == null)
             return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+
+        accessControlService.checkProgramEncounterPrivilege(PrivilegeType.ViewVisit, programEncounter);
         return new ResponseEntity<>(EncounterResponse.fromProgramEncounter(programEncounter, conceptRepository, conceptService), HttpStatus.OK);
     }
 
     @PostMapping(value = "/api/programEncounter")
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     @ResponseBody
     public ResponseEntity post(@RequestBody ApiProgramEncounterRequest request) throws IOException {
+        accessControlService.checkProgramEncounterPrivilege(PrivilegeType.EditVisit, request.getEncounterType());
         ProgramEncounter encounter = createEncounter(request.getExternalId());
         try {
             ProgramEnrolment programEnrolment = getProgramEnrolment(request);
             encounter.setProgramEnrolment(programEnrolment);
-            updateEncounter(encounter, request);
+            encounter = updateEncounter(encounter, request);
         } catch (ValidationException ve) {
             return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ve.getMessage());
         }
@@ -126,9 +145,10 @@ public class ProgramEncounterApiController {
 
     @PutMapping(value = "/api/programEncounter/{id}")
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     @ResponseBody
     public ResponseEntity put(@PathVariable String id, @RequestBody ApiProgramEncounterRequest request) throws IOException {
+        accessControlService.checkProgramEncounterPrivilege(PrivilegeType.EditVisit, request.getEncounterType());
         ProgramEncounter encounter = programEncounterRepository.findByLegacyIdOrUuid(id);
         if (encounter == null && StringUtils.hasLength(request.getExternalId())) {
             encounter = programEncounterRepository.findByLegacyId(request.getExternalId().trim());
@@ -151,6 +171,7 @@ public class ProgramEncounterApiController {
         ProgramEncounter programEncounter = programEncounterRepository.findByLegacyIdOrUuid(legacyIdOrUuid);
         if (programEncounter == null)
             return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+        accessControlService.checkProgramEncounterPrivilege(PrivilegeType.VoidVisit, programEncounter);
         programEncounter.setVoided(true);
         programEncounter = programEncounterService.save(programEncounter);
         return new ResponseEntity<>(EncounterResponse.fromProgramEncounter(programEncounter, conceptRepository, conceptService), HttpStatus.OK);
@@ -161,16 +182,15 @@ public class ProgramEncounterApiController {
         if (encounterType == null) {
             throw new IllegalArgumentException(String.format("Encounter type not found with name '%s'", request.getEncounterType()));
         }
-        if(StringUtils.hasLength(request.getExternalId())) {
+        if (StringUtils.hasLength(request.getExternalId())) {
             encounter.setLegacyId(request.getExternalId().trim());
         }
         encounter.setEncounterType(encounterType);
         encounter.setEncounterLocation(request.getEncounterLocation());
         encounter.setCancelLocation(request.getCancelLocation());
-        encounter.setEncounterDateTime(request.getEncounterDateTime());
+        encounter.setTiming(request.getEncounterDateTime(), request.getCancelDateTime(), userService.getCurrentUser());
         encounter.setEarliestVisitDateTime(request.getEarliestScheduledDate());
         encounter.setMaxVisitDateTime(request.getMaxScheduledDate());
-        encounter.setCancelDateTime(request.getCancelDateTime());
         encounter.setObservations(RequestUtils.createObservations(request.getObservations(), conceptRepository));
         encounter.setCancelObservations(RequestUtils.createObservations(request.getCancelObservations(), conceptRepository));
         encounter.setVoided(request.isVoided());

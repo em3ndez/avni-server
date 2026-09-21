@@ -2,16 +2,19 @@ package org.avni.server.service;
 
 import com.bugsnag.Bugsnag;
 import org.avni.messaging.domain.EntityType;
+import org.avni.server.application.FormMapping;
+import org.avni.server.application.FormType;
 import org.avni.server.common.EntityHelper;
 import org.avni.server.common.Messageable;
 import org.avni.server.dao.*;
 import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.geo.Point;
 import org.avni.server.util.BadRequestError;
 import org.avni.server.web.request.EntityTypeContract;
 import org.avni.server.web.request.PointRequest;
 import org.avni.server.web.request.ProgramEncounterRequest;
-import org.avni.server.web.request.ProgramEncountersContract;
+import org.avni.server.web.request.ProgramEncounterContract;
 import org.avni.server.web.request.rules.RulesContractWrapper.Decision;
 import org.avni.server.web.request.rules.RulesContractWrapper.Decisions;
 import org.avni.server.web.request.rules.RulesContractWrapper.VisitSchedule;
@@ -27,32 +30,38 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
-public class ProgramEncounterService implements ScopeAwareService {
-    private static org.slf4j.Logger logger = LoggerFactory.getLogger(ProgramEncounterService.class);
+public class ProgramEncounterService implements ScopeAwareService<ProgramEncounter> {
+    private static final org.slf4j.Logger logger = LoggerFactory.getLogger(ProgramEncounterService.class);
     @Autowired
     Bugsnag bugsnag;
-    private ProgramEncounterRepository programEncounterRepository;
-    private EncounterTypeRepository encounterTypeRepository;
-    private OperationalEncounterTypeRepository operationalEncounterTypeRepository;
-    private ObservationService observationService;
-    private ProgramEnrolmentRepository programEnrolmentRepository;
+    private final ProgramEncounterRepository programEncounterRepository;
+    private final EncounterTypeRepository encounterTypeRepository;
+    private final OperationalEncounterTypeRepository operationalEncounterTypeRepository;
+    private final ObservationService observationService;
+    private final ProgramEnrolmentRepository programEnrolmentRepository;
+    private final FormMappingService formMappingService;
+    private final UserService userService;
+    private final SubjectMigrationService subjectMigrationService;
 
     @Autowired
-    public ProgramEncounterService(ProgramEncounterRepository programEncounterRepository, EncounterTypeRepository encounterTypeRepository, OperationalEncounterTypeRepository operationalEncounterTypeRepository, ObservationService observationService, ProgramEnrolmentRepository programEnrolmentRepository) {
+    public ProgramEncounterService(ProgramEncounterRepository programEncounterRepository, EncounterTypeRepository encounterTypeRepository, OperationalEncounterTypeRepository operationalEncounterTypeRepository, ObservationService observationService, ProgramEnrolmentRepository programEnrolmentRepository, FormMappingService formMappingService, UserService userService, SubjectMigrationService subjectMigrationService) {
         this.programEncounterRepository = programEncounterRepository;
         this.encounterTypeRepository = encounterTypeRepository;
         this.operationalEncounterTypeRepository = operationalEncounterTypeRepository;
         this.observationService = observationService;
         this.programEnrolmentRepository = programEnrolmentRepository;
+        this.formMappingService = formMappingService;
+        this.userService = userService;
+        this.subjectMigrationService = subjectMigrationService;
     }
 
-    public ProgramEncountersContract getProgramEncounterByUuid(String uuid) {
+    public ProgramEncounterContract getProgramEncounterByUuid(String uuid) {
         ProgramEncounter programEncounter = programEncounterRepository.findByUuid(uuid);
         return constructProgramEncounters(programEncounter);
     }
 
-    public ProgramEncountersContract constructProgramEncounters(ProgramEncounter programEncounter) {
-        ProgramEncountersContract programEncountersContract = new ProgramEncountersContract();
+    public ProgramEncounterContract constructProgramEncounters(ProgramEncounter programEncounter) {
+        ProgramEncounterContract programEncountersContract = new ProgramEncounterContract();
         EntityTypeContract entityTypeContract = new EntityTypeContract();
         entityTypeContract.setName(programEncounter.getEncounterType().getName());
         entityTypeContract.setUuid(programEncounter.getEncounterType().getUuid());
@@ -107,7 +116,7 @@ public class ProgramEncounterService implements ScopeAwareService {
             ProgramEncounter programEncounter = createEmptyProgramEncounter(programEnrolment, operationalEncounterType);
             allScheduleEncountersByType = Arrays.asList(programEncounter);
         }
-        allScheduleEncountersByType.stream().forEach(programEncounter -> {
+        allScheduleEncountersByType.forEach(programEncounter -> {
             updateProgramEncounterWithVisitSchedule(programEncounter, visitSchedule);
             programEncounter.setProgramEnrolment(programEnrolment);
             this.save(programEncounter);
@@ -124,7 +133,6 @@ public class ProgramEncounterService implements ScopeAwareService {
         ProgramEncounter programEncounter = new ProgramEncounter();
         programEncounter.setEncounterType(operationalEncounterType.getEncounterType());
         programEncounter.setProgramEnrolment(programEnrolment);
-        programEncounter.setEncounterDateTime(null);
         programEncounter.setUuid(UUID.randomUUID().toString());
         programEncounter.setVoided(false);
         programEncounter.setObservations(new ObservationCollection());
@@ -133,16 +141,27 @@ public class ProgramEncounterService implements ScopeAwareService {
     }
 
     @Messageable(EntityType.ProgramEncounter)
-    public ProgramEncounter saveProgramEncounter(ProgramEncounterRequest request) {
+    public ProgramEncounter saveProgramEncounter(ProgramEncounterRequest request) throws ValidationException {
         logger.info(String.format("Saving programEncounter with uuid %s", request.getUuid()));
         checkForSchedulingCompleteConstraintViolation(request);
-        EncounterType encounterType = encounterTypeRepository.findByUuidOrName(request.getEncounterType(), request.getEncounterTypeUUID());
+        EncounterType encounterType = encounterTypeRepository.findByUuidOrName(request.getEncounterTypeUUID(), request.getEncounterType());
+        Decisions decisions = request.getDecisions();
+        observationService.validateObservationsAndDecisions(request.getObservations(), decisions != null ? decisions.getEncounterDecisions() : null, formMappingService.find(encounterType, FormType.ProgramEncounter));
         ProgramEncounter encounter = EntityHelper.newOrExistingEntity(programEncounterRepository, request, new ProgramEncounter());
         //Planned visit can not overwrite completed encounter
         if (encounter.isCompleted() && request.isPlanned())
             return null;
-
-        encounter.setEncounterDateTime(request.getEncounterDateTime());
+        if ((request.getObservations() == null || request.getObservations().isEmpty()) && encounter.getObservations() != null && !encounter.getObservations().isEmpty()) {
+            String errorMessage = String.format("ProgramEncounter Observations is getting empty. User: %s, UUID: %s, ", UserContextHolder.getUser().getUsername(), request.getUuid());
+            bugsnag.notify(new Exception(errorMessage));
+            logger.error(errorMessage);
+        }
+        if ((request.getCancelObservations() == null || request.getCancelObservations().isEmpty()) && encounter.getCancelObservations() != null && !encounter.getCancelObservations().isEmpty()) {
+            String errorMessage = String.format("ProgramEncounter Cancel Observations is getting empty. User: %s, UUID: %s, ", UserContextHolder.getUser().getUsername(), request.getUuid());
+            bugsnag.notify(new Exception(errorMessage));
+            logger.error(errorMessage);
+        }
+        encounter.setTiming(request.getEncounterDateTime(), request.getCancelDateTime(), userService.getCurrentUser());
         ProgramEnrolment programEnrolment = programEnrolmentRepository.findByUuid(request.getProgramEnrolmentUUID());
         encounter.setProgramEnrolment(programEnrolment);
         encounter.setEncounterType(encounterType);
@@ -150,8 +169,8 @@ public class ProgramEncounterService implements ScopeAwareService {
         encounter.setName(request.getName());
         encounter.setEarliestVisitDateTime(request.getEarliestVisitDateTime());
         encounter.setMaxVisitDateTime(request.getMaxVisitDateTime());
-        encounter.setCancelDateTime(request.getCancelDateTime());
         encounter.setCancelObservations(observationService.createObservations(request.getCancelObservations()));
+
         PointRequest encounterLocation = request.getEncounterLocation();
         if (encounterLocation != null)
             encounter.setEncounterLocation(new Point(encounterLocation.getX(), encounterLocation.getY()));
@@ -159,7 +178,6 @@ public class ProgramEncounterService implements ScopeAwareService {
         if (cancelLocation != null)
             encounter.setCancelLocation(new Point(cancelLocation.getX(), cancelLocation.getY()));
 
-        Decisions decisions = request.getDecisions();
         if (decisions != null) {
             ObservationCollection observationsFromDecisions = observationService
                     .createObservationsFromDecisions(decisions.getEncounterDecisions());
@@ -168,12 +186,17 @@ public class ProgramEncounterService implements ScopeAwareService {
             } else {
                 encounter.getObservations().putAll(observationsFromDecisions);
             }
+
             List<Decision> enrolmentDecisions = decisions.getEnrolmentDecisions();
             if (enrolmentDecisions != null) {
                 ObservationCollection enrolmentObservations = observationService.createObservationsFromDecisions(enrolmentDecisions);
                 programEnrolment.getObservations().putAll(enrolmentObservations);
             }
-
+            List<Decision> registrationDecisions = decisions.getRegistrationDecisions();
+            if (registrationDecisions != null) {
+                ObservationCollection registrationObservations = observationService.createObservationsFromDecisions(registrationDecisions);
+                subjectMigrationService.applyRegistrationDecisionsAndPropagate(programEnrolment.getIndividual(), registrationObservations);
+            }
         }
         encounter = this.save(encounter);
         logger.info(String.format("Saved programEncounter with uuid %s", request.getUuid()));
@@ -195,7 +218,7 @@ public class ProgramEncounterService implements ScopeAwareService {
     }
 
     @Override
-    public OperatingIndividualScopeAwareRepository repository() {
+    public OperatingIndividualScopeAwareRepository<ProgramEncounter> repository() {
         return programEncounterRepository;
     }
 
@@ -208,8 +231,17 @@ public class ProgramEncounterService implements ScopeAwareService {
         if (individual.getAddressLevel() != null) {
             programEncounter.setAddressId(individual.getAddressLevel().getId());
         }
-        programEncounter = programEncounterRepository.save(programEncounter);
-
+        programEncounter = programEncounterRepository.saveEntity(programEncounter);
         return programEncounter;
+    }
+
+    public FormMapping getFormMapping(ProgramEncounter programEncounter) {
+        SubjectType subjectType = programEncounter.getIndividual().getSubjectType();
+        Program program = programEncounter.getProgramEnrolment().getProgram();
+        return formMappingService.findBy(subjectType, program, programEncounter.getEncounterType(), getFormType(programEncounter));
+    }
+
+    private static FormType getFormType(ProgramEncounter programEncounter) {
+        return programEncounter.isCancelled() ? FormType.ProgramEncounterCancellation : FormType.ProgramEncounter;
     }
 }

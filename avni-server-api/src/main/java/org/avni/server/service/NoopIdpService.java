@@ -1,14 +1,24 @@
 package org.avni.server.service;
 
+import org.avni.messaging.domain.EntityType;
+import org.avni.server.common.Messageable;
 import org.avni.server.domain.OrganisationConfig;
 import org.avni.server.domain.User;
+import org.avni.server.framework.security.UserContextHolder;
+import org.springframework.stereotype.Service;
 
+@Service
 public class NoopIdpService implements IdpService {
+
+    @Messageable(EntityType.User)
     @Override
-    public UserCreateStatus createUser(User user, OrganisationConfig organisationConfig) {
-        UserCreateStatus userCreateStatus = new UserCreateStatus();
+    public void createUser(User user, OrganisationConfig organisationConfig) {
+        UserCreateStatus userCreateStatus = new UserCreateStatus(user, UserContextHolder.getUser());
         userCreateStatus.setIdpUserCreated(true);
-        return userCreateStatus;
+    }
+
+    @Override
+    public void createInActiveUser(User user, OrganisationConfig organisationConfig) throws IDPException {
     }
 
     @Override
@@ -24,17 +34,20 @@ public class NoopIdpService implements IdpService {
     }
 
     @Override
-    public void enableUser(User user) {
-    }
-
-    @Override
     public boolean resetPassword(User user, String password) {
         return true;
     }
 
+    @Messageable(EntityType.User)
     @Override
-    public UserCreateStatus createUserWithPassword(User user, String password, OrganisationConfig organisationConfig) {
-        return this.createUser(user, organisationConfig);
+    public void createUserWithPassword(User user, String password, OrganisationConfig organisationConfig) {
+        this.createUser(user, organisationConfig);
+    }
+
+    @Messageable(EntityType.User)
+    @Override
+    public void createSuperAdmin(User user, String password) throws IDPException {
+        this.createUser(user, null);
     }
 
     @Override
@@ -42,8 +55,22 @@ public class NoopIdpService implements IdpService {
         return true;
     }
 
+    @Messageable(EntityType.User)
     @Override
-    public UserCreateStatus createUserIfNotExists(User user, OrganisationConfig organisationConfig) {
-        return this.createUser(user, organisationConfig);
+    public void createUserIfNotExists(User user, OrganisationConfig organisationConfig) {
+        this.createUser(user, organisationConfig);
+    }
+
+    @Override
+    public long getLastLoginTime(User user) {
+        return -1L;
+    }
+
+    @Override
+    public void enableUser(User user) {
+    }
+
+    @Override
+    public void resendPassword(User user) {
     }
 }

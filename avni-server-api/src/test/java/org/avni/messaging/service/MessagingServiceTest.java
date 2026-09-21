@@ -1,17 +1,23 @@
 package org.avni.messaging.service;
 
+import org.avni.messaging.contract.StartFlowForContactRequest;
 import org.avni.messaging.domain.*;
+import org.avni.messaging.domain.exception.GlificException;
+import org.avni.messaging.domain.exception.GlificNotConfiguredException;
 import org.avni.messaging.repository.GlificMessageRepository;
 import org.avni.messaging.repository.ManualMessageRepository;
 import org.avni.messaging.repository.MessageRequestQueueRepository;
 import org.avni.messaging.repository.MessageRuleRepository;
 import org.avni.server.domain.Organisation;
 import org.avni.server.domain.RuleExecutionException;
+import org.avni.server.domain.User;
 import org.avni.server.domain.UserContext;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.EntityTypeRetrieverService;
 import org.avni.server.service.RuleService;
 import org.avni.server.web.request.rules.response.ScheduleRuleResponseEntity;
 import org.joda.time.DateTime;
+import org.joda.time.Duration;
 import org.joda.time.format.DateTimeFormat;
 import org.joda.time.format.DateTimeFormatter;
 import org.junit.Before;
@@ -57,18 +63,27 @@ public class MessagingServiceTest {
     @Mock
     private IndividualMessagingService individualMessagingService;
 
+    @Mock
+    private EntityTypeRetrieverService entityTypeRetrieverService;
+
+    @Mock
+    private FlowRequestQueueService flowRequestQueueService;
+
     @Captor
     ArgumentCaptor<MessageReceiver> messageReceiver;
 
     @Captor
     ArgumentCaptor<MessageRequest> messageRequest;
 
+    private String scheduledSinceDays;
+
     @Before
     public void setup() {
         initMocks(this);
         messagingService = new MessagingService(messageRuleRepository, messageReceiverService,
                 messageRequestService, messageRequestQueueRepository,
-                manualMessageRepository, ruleService, groupMessagingService, individualMessagingService, null);
+                manualMessageRepository, ruleService, groupMessagingService, individualMessagingService, null, entityTypeRetrieverService, flowRequestQueueService);
+        scheduledSinceDays = "4";
     }
 
     @Test
@@ -167,7 +182,7 @@ public class MessagingServiceTest {
     }
 
     @Test
-    public void shouldSendMessagesForAllNotSentMessages() throws RuleExecutionException, PhoneNumberNotAvailableOrIncorrectException {
+    public void shouldSendMessagesForAllNotSentMessages() throws RuleExecutionException, PhoneNumberNotAvailableOrIncorrectException, GlificNotConfiguredException {
         MessageRule messageRule = new MessageRule();
         messageRule.setId(10L);
         messageRule.setMessageRule("I am a message rule");
@@ -178,12 +193,78 @@ public class MessagingServiceTest {
         UserContext context = new UserContext();
         context.setOrganisation(new Organisation());
         UserContextHolder.create(context);
+        Duration scheduledSince = Duration.standardDays(Long.parseLong(scheduledSinceDays));
 
-        when(messageRequestQueueRepository.findDueMessageRequests()).thenReturn(Stream.<MessageRequest>builder().add(request).build());
+        when(messageRequestQueueRepository.findDueMessageRequests(scheduledSince)).thenReturn(Stream.<MessageRequest>builder().add(request).build());
         when(messageRequestService.markComplete(request)).thenReturn(request);
 
-        messagingService.sendMessages();
+        messagingService.sendMessages(scheduledSince);
 
         verify(individualMessagingService).sendAutomatedMessage(request);
+    }
+
+    @Test
+    public void shouldSaveMessageRequestIfMessageRuleConfiguredOnSaveOfUserEntityType() throws RuleExecutionException {
+        MessageRule messageRule = mock(MessageRule.class);
+        ArrayList<MessageRule> messageRuleList = new ArrayList<MessageRule>() {
+            {
+                add(messageRule);
+            }
+        };
+
+        Long userId = 890L;
+        when(messageRuleRepository.findAllByReceiverTypeAndEntityTypeAndIsVoidedFalse(ReceiverType.User, EntityType.User)).thenReturn(messageRuleList);
+
+        MessageReceiver messageReceiver = mock(MessageReceiver.class);
+        when(messageReceiverService.saveReceiverIfRequired(ReceiverType.User, userId)).thenReturn(messageReceiver);
+        Long messageReceiverId = 890L;
+        when(messageReceiver.getId()).thenReturn(messageReceiverId);
+
+        String scheduleRule = "function(params, imports) { return {'scheduledDateTime': '2013-02-04 10:35:24'; }}";
+        when(messageRule.getScheduleRule()).thenReturn(scheduleRule);
+        Long messageRuleId = 123L;
+        when(messageRule.getId()).thenReturn(messageRuleId);
+        when(messageRule.getEntityType()).thenReturn(EntityType.User);
+        when(messageRule.getReceiverType()).thenReturn(ReceiverType.User);
+
+        DateTimeFormatter formatter = DateTimeFormat.forPattern("yyyy-MM-dd HH:mm:ss");
+        DateTime scheduledDateTime = formatter.parseDateTime("2013-02-04 10:35:24");
+        ScheduleRuleResponseEntity scheduleRuleResponseEntity = new ScheduleRuleResponseEntity();
+        scheduleRuleResponseEntity.setScheduledDateTime(scheduledDateTime);
+        when(ruleService.executeScheduleRuleForEntityTypeUser(userId, scheduleRule)).thenReturn(scheduleRuleResponseEntity);
+
+        messagingService.onUserEntitySave(userId, new User());
+        verify(messageReceiverService).saveReceiverIfRequired(eq(ReceiverType.User), eq(userId));
+        verify(ruleService).executeScheduleRuleForEntityTypeUser(eq(userId), eq(scheduleRule));
+        verify(messageRequestService).createOrUpdateAutomatedMessageRequest(messageRule, messageReceiver, userId, scheduledDateTime);
+    }
+
+    @Test
+    public void shouldSaveFlowRequestOnCreateFlowRequest() {
+        String receiverId = "1";
+        String flowId = "test-flow-id";
+        MessageReceiver receiver = new MessageReceiver(ReceiverType.Subject, 1L);
+
+        StartFlowForContactRequest request = new StartFlowForContactRequest();
+        request.setReceiverId(receiverId);
+        request.setReceiverType(ReceiverType.Subject);
+        request.setFlowId(flowId);
+
+        when(messageReceiverService.saveReceiverIfRequired(ReceiverType.Subject, 1L)).thenReturn(receiver);
+
+        messagingService.createFlowRequest(request);
+
+        verify(flowRequestQueueService).saveFlowRequest(receiver, flowId);
+    }
+
+    @Test
+    public void shouldInvokeStartFlowForContact() throws PhoneNumberNotAvailableOrIncorrectException, GlificNotConfiguredException, GlificException {
+        MessageReceiver receiver = new MessageReceiver(ReceiverType.Subject, 1L);
+        String flowId = "test-flow-id";
+        FlowRequest flowRequest = new FlowRequest(receiver, flowId, DateTime.now());
+
+        messagingService.invokeStartFlowForContact(flowRequest);
+
+        verify(individualMessagingService).invokeStartFlowForContact(receiver, flowId);
     }
 }

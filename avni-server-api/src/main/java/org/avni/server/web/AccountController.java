@@ -1,10 +1,12 @@
 package org.avni.server.web;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.AccountRepository;
 import org.avni.server.domain.Account;
 import org.avni.server.domain.AccountAdmin;
 import org.avni.server.domain.User;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.util.ReactAdminUtil;
 import org.avni.server.web.request.AccountRequest;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,31 +15,32 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.repository.query.Param;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
 import java.util.HashSet;
 import java.util.Set;
 
 @RestController
 public class AccountController implements RestControllerResourceProcessor<Account> {
-    private AccountRepository accountRepository;
+    private final AccountRepository accountRepository;
+    private final AccessControlService accessControlService;
 
     @Autowired
-    public AccountController(AccountRepository accountRepository) {
+    public AccountController(AccountRepository accountRepository, AccessControlService accessControlService) {
         this.accountRepository = accountRepository;
+        this.accessControlService = accessControlService;
     }
 
     @RequestMapping(value = "/account", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
     public ResponseEntity createAccount(@RequestBody AccountRequest accountRequest) {
+        accessControlService.assertIsSuperAdmin();
         if (accountRepository.findByName(accountRequest.getName()) != null) {
             return ResponseEntity.badRequest().body(ReactAdminUtil.generateJsonError(String.format("Account with name %s already exists", accountRequest.getName())));
         }
         Account account = new Account();
         account.setName(accountRequest.getName());
+        account.setRegion(accountRequest.getRegion());
         User user = UserContextHolder.getUserContext().getUser();
         setDefaultAccountAdmin(account, user, new HashSet<>());
         accountRepository.save(account);
@@ -46,17 +49,19 @@ public class AccountController implements RestControllerResourceProcessor<Accoun
 
     @RequestMapping(value = "/account/{id}", method = RequestMethod.PUT)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
     public ResponseEntity<?> updateAccount(@PathVariable Long id, @RequestBody AccountRequest accountRequest) {
+        accessControlService.assertIsSuperAdmin();
         Account account = accountRepository.findOne(id);
         account.setName(accountRequest.getName());
+        account.setRegion(accountRequest.getRegion());
         accountRepository.save(account);
         return new ResponseEntity<>(account, HttpStatus.OK);
     }
 
     @RequestMapping(value = {"/account/search/findAll", "/account", "/account/search/find"}, method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     public Page<Account> get(@Param("name") String name, Pageable pageable) {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         if (name != null) {
             return accountRepository.findByAccountAdmin_User_IdAndNameIgnoreCaseContaining(user.getId(), name, pageable);
@@ -66,12 +71,12 @@ public class AccountController implements RestControllerResourceProcessor<Accoun
     }
 
     @RequestMapping(value = "/account/{id}", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     public Account getById(@PathVariable Long id) {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         return accountRepository.findByIdAndAccountAdmin_User_Id(id, user.getId());
     }
-
 
     private void setDefaultAccountAdmin(Account account, User user, Set<AccountAdmin> accountAdmins) {
         AccountAdmin accountAdmin = new AccountAdmin();
@@ -81,5 +86,4 @@ public class AccountController implements RestControllerResourceProcessor<Accoun
         accountAdmins.add(accountAdmin);
         account.setAccountAdmin(accountAdmins);
     }
-
 }

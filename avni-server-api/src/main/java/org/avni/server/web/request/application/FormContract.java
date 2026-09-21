@@ -4,22 +4,17 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import org.avni.server.application.Form;
 import org.avni.server.domain.DeclarativeRule;
+import org.avni.server.domain.JsonObject;
 import org.avni.server.domain.SubjectType;
 import org.avni.server.web.request.ConceptContract;
 import org.avni.server.web.request.ReferenceDataContract;
-
-import java.io.InvalidObjectException;
-
 import org.avni.server.web.request.webapp.task.TaskTypeContract;
 import org.joda.time.DateTime;
+
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
 import java.util.stream.Collectors;
-
-import static org.avni.server.application.FormElement.PLACEHOLDER_CONCEPT_NAME;
-import static org.avni.server.application.FormElement.PLACEHOLDER_CONCEPT_UUID;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder({"name", "uuid", "formType", "userUUID", "formElementGroups"})
@@ -32,6 +27,7 @@ public class FormContract extends ReferenceDataContract {
     private String programName;
     private List<String> encounterTypes;
     private String decisionRule;
+    private String editFormRule;
     private String visitScheduleRule;
     private String taskScheduleRule;
     private String validationRule;
@@ -45,6 +41,9 @@ public class FormContract extends ReferenceDataContract {
     private DeclarativeRule decisionDeclarativeRule;
     private DeclarativeRule visitScheduleDeclarativeRule;
     private DeclarativeRule taskScheduleDeclarativeRule;
+    private String shareRule;
+    private String shareTemplateS3Key;
+    private JsonObject shareTranslations;
 
     public FormContract() {
     }
@@ -91,25 +90,6 @@ public class FormContract extends ReferenceDataContract {
         return organisationId;
     }
 
-    public void validate() throws InvalidObjectException {
-        HashSet<String> uniqueConcepts = new HashSet<>();
-        for (FormElementGroupContract formElementGroup : getFormElementGroups()) {
-            for (FormElementContract formElement : formElementGroup.getFormElements()) {
-                String conceptUuid = formElement.getConcept().getUuid();
-                String conceptName = formElement.getConcept().getName();
-                if (!formElement.isVoided() && !formElement.isChildFormElement() &&
-                        !PLACEHOLDER_CONCEPT_NAME.matcher(conceptName == null ? "" : conceptName).matches() &&
-                        !conceptUuid.equals(PLACEHOLDER_CONCEPT_UUID) &&
-                        !uniqueConcepts.add(conceptUuid)) {
-                    throw new InvalidObjectException(String.format(
-                            "Cannot use same concept twice. Form{uuid='%s',..} uses Concept{uuid='%s',..} twice",
-                            getUuid(),
-                            conceptUuid));
-                }
-            }
-        }
-    }
-
     public SubjectType getSubjectType() {
         return subjectType;
     }
@@ -141,6 +121,7 @@ public class FormContract extends ReferenceDataContract {
         formContract.setUuid(form.getUuid());
         formContract.setVoided(form.isVoided());
         formContract.setDecisionRule(form.getDecisionRule());
+        formContract.setEditFormRule(form.getEditFormRule());
         formContract.setVisitScheduleRule(form.getVisitScheduleRule());
         formContract.setValidationRule(form.getValidationRule());
         formContract.setChecklistsRule(form.getChecklistsRule());
@@ -149,6 +130,9 @@ public class FormContract extends ReferenceDataContract {
         formContract.setVisitScheduleDeclarativeRule(form.getVisitScheduleDeclarativeRule());
         formContract.setTaskScheduleRule(form.getTaskScheduleRule());
         formContract.setTaskScheduleDeclarativeRule(form.getTaskScheduleDeclarativeRule());
+        formContract.setShareRule(form.getShareRule());
+        formContract.setShareTemplateS3Key(form.getShareTemplateS3Key());
+        formContract.setShareTranslations(form.getShareTranslations());
 
         List<FormElementGroupContract> fegContracts = form.getFormElementGroups().stream()
                 .map(FormElementGroupContract::fromFormElementGroup)
@@ -288,5 +272,37 @@ public class FormContract extends ReferenceDataContract {
 
     public void setTaskScheduleDeclarativeRule(DeclarativeRule taskScheduleDeclarativeRule) {
         this.taskScheduleDeclarativeRule = taskScheduleDeclarativeRule;
+    }
+
+    public String getEditFormRule() {
+        return editFormRule;
+    }
+
+    public void setEditFormRule(String editFormRule) {
+        this.editFormRule = editFormRule;
+    }
+
+    public String getShareRule() {
+        return shareRule;
+    }
+
+    public void setShareRule(String shareRule) {
+        this.shareRule = shareRule;
+    }
+
+    public String getShareTemplateS3Key() {
+        return shareTemplateS3Key;
+    }
+
+    public void setShareTemplateS3Key(String shareTemplateS3Key) {
+        this.shareTemplateS3Key = shareTemplateS3Key;
+    }
+
+    public JsonObject getShareTranslations() {
+        return shareTranslations;
+    }
+
+    public void setShareTranslations(JsonObject shareTranslations) {
+        this.shareTranslations = shareTranslations;
     }
 }

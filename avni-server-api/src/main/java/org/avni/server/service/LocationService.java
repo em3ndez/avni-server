@@ -1,5 +1,6 @@
 package org.avni.server.service;
 
+import jakarta.validation.constraints.NotNull;
 import org.avni.server.application.FormElement;
 import org.avni.server.application.FormElementType;
 import org.avni.server.application.KeyType;
@@ -8,13 +9,16 @@ import org.avni.server.builder.BuilderException;
 import org.avni.server.builder.LocationBuilder;
 import org.avni.server.dao.*;
 import org.avni.server.domain.*;
+import org.avni.server.domain.sync.SyncEntityName;
 import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.util.S;
+import org.avni.server.util.ValidationUtil;
 import org.avni.server.web.request.AddressLevelTypeContract;
 import org.avni.server.web.request.LocationContract;
 import org.avni.server.web.request.LocationEditContract;
 import org.avni.server.web.request.ReferenceDataContract;
 import org.avni.server.web.request.webapp.search.LocationSearchRequest;
+import org.avni.server.web.validation.ValidationException;
 import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,38 +27,41 @@ import org.springframework.data.domain.Page;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-import javax.validation.constraints.NotNull;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
-public class LocationService implements ScopeAwareService {
+public class LocationService implements ScopeAwareService<AddressLevel> {
 
     private final AddressLevelTypeRepository addressLevelTypeRepository;
     private final OrganisationRepository organisationRepository;
     private final LocationRepository locationRepository;
     private final LocationMappingRepository locationMappingRepository;
+    private final ResetSyncService resetSyncService;
+    private final OrganisationConfigService organisationConfigService;
     private final Logger logger;
 
     @Autowired
-    public LocationService(LocationRepository locationRepository, AddressLevelTypeRepository addressLevelTypeRepository, OrganisationRepository organisationRepository, LocationMappingRepository locationMappingRepository) {
+    public LocationService(LocationRepository locationRepository, AddressLevelTypeRepository addressLevelTypeRepository, OrganisationRepository organisationRepository, LocationMappingRepository locationMappingRepository, ResetSyncService resetSyncService, OrganisationConfigService organisationConfigService) {
         this.locationRepository = locationRepository;
         this.addressLevelTypeRepository = addressLevelTypeRepository;
         this.organisationRepository = organisationRepository;
         this.locationMappingRepository = locationMappingRepository;
+        this.resetSyncService = resetSyncService;
+        this.organisationConfigService = organisationConfigService;
         this.logger = LoggerFactory.getLogger(this.getClass());
     }
 
-    public List<AddressLevel> saveAll(List<LocationContract> locationContracts) throws BuilderException {
+    public List<AddressLevel> saveAll(List<LocationContract> locationContracts) {
         List<AddressLevel> saved = new ArrayList<>();
-        for (LocationContract contract : locationContracts) saved.add(save(contract));
+        for (LocationContract contract : locationContracts) {
+            saved.add(save(contract));
+        }
         return saved;
     }
 
-    public AddressLevel save(LocationContract locationContract) throws BuilderException {
+    public AddressLevel save(LocationContract locationContract) {
         logger.info(String.format("Processing location request: %s", locationContract.toString()));
         AddressLevelType type = getTypeByUuidOrName(locationContract);
         if (type == null) {
@@ -90,7 +97,7 @@ public class LocationService implements ScopeAwareService {
         return addressLevelType;
     }
 
-    private AddressLevel saveLocation(LocationContract contract, AddressLevelType type) throws BuilderException {
+    private AddressLevel saveLocation(LocationContract contract, AddressLevelType type) {
         LocationBuilder locationBuilder = new LocationBuilder(locationRepository.findByUuid(contract.getUuid()), type);
         locationBuilder.copy(contract);
         AddressLevel location = locationBuilder.build();
@@ -98,31 +105,23 @@ public class LocationService implements ScopeAwareService {
 
         // Validate location title/name is unique only if new AddressLevel
         if (location.getId() == null && !titleIsValid(location, contract.getName().trim(), type))
-            throw new BuilderException(String.format("Location with same name '%s' and type '%s' exists at this level", contract.getName(), type.getName()));
+            throw new BuilderException(String.format("Location with same name '%s' and type '%s' exists at this level.", contract.getName(), type.getName()),
+                    contract.toString());
 
         try {
             locationRepository.save(location);
         } catch (Exception e) {
-            logger.error(e.getMessage());
-            throw new BuilderException(String.format("Unable to create Location{name='%s',level='%s',orgUUID='%s',..}: '%s'", contract.getName(), contract.getLevel(), contract.getOrganisationUUID(), e.getMessage()));
+            logger.error(e.getMessage(), e);
+            throw new BuilderException(String.format("Unable to create Location{name='%s',level='%s',orgUUID='%s',..}: '%s'", contract.getName(), contract.getLevel(), contract.getOrganisationUUID(), e.getMessage()), contract.toString());
         }
         try {
-            updateLineage(location);
+            location.calculateLineage();
             locationRepository.save(location);
         } catch (Exception e) {
-            logger.error(e.getMessage());
-            throw new BuilderException(String.format("Unable to update lineage for location with Id %s - %s", location.getId(), e.getMessage()));
+            logger.error(e.getMessage(), e);
+            throw new BuilderException(String.format("Unable to update lineage for location with Id %s - %s.", location.getId(), e.getMessage()), contract.toString());
         }
         return location;
-    }
-
-    private void updateLineage(AddressLevel location) {
-        if (location.getParent() == null) {
-            location.setLineage(location.getId().toString());
-        } else {
-            String lineage = location.getParent().getLineage() + "." + location.getId().toString();
-            location.setLineage(lineage);
-        }
     }
 
     private void updateOrganisationIfNeeded(AddressLevel location, @NotNull LocationContract contract) {
@@ -169,13 +168,7 @@ public class LocationService implements ScopeAwareService {
         }
 
         if (locationEditContract.getParentId() != null && !locationEditContract.getParentId().equals(location.getParentId())) {
-            Long oldParentId = location.getParentId();
-            Long newParentId = locationEditContract.getParentId();
-            String lineage = location.getLineage();
-            updateDescendantLocationLineage(locationRepository.findAllByParent(location), oldParentId, newParentId);
-            updateLocationMapping(location, locationEditContract);
-            location.setLineage(updateLineage(lineage, oldParentId, newParentId));
-            location.setParent(locationRepository.findOne(newParentId));
+            updateParent(location, locationEditContract.getParentId());
         }
 
         location.setTitle(locationEditContract.getTitle());
@@ -183,31 +176,38 @@ public class LocationService implements ScopeAwareService {
         return location;
     }
 
-    private void updateLocationMapping(AddressLevel location, LocationEditContract locationEditContract) {
+    public void updateParent(AddressLevel location, AddressLevel newParent) {
+        Long oldParentId = location.getParentId();
+        location.setLineage(updateLineage(location, newParent.getLineage()));
+        location.setParent(newParent);
+        locationRepository.save(location);
+        updateDescendantLocationLineage(locationRepository.findAllByParent(location), location.getLineage());
+        updateLocationMapping(location, newParent);
+        resetSyncService.recordLocationParentChange(location, oldParentId);
+    }
+
+    private void updateParent(AddressLevel location, Long newParentId) {
+        updateParent(location, locationRepository.findOne(newParentId));
+    }
+
+    private void updateLocationMapping(AddressLevel location, AddressLevel newParent) {
         List<ParentLocationMapping> locationMappings = locationMappingRepository.findAllByLocation(location);
-        AddressLevel newParent = locationRepository.findOne(locationEditContract.getParentId());
         List<ParentLocationMapping> updatedLocationMappings = locationMappings.stream()
                 .peek(locationMapping -> locationMapping.setParentLocation(newParent))
                 .collect(Collectors.toList());
         locationMappingRepository.saveAll(updatedLocationMappings);
     }
 
-    private String updateLineage(String lineage, Long oldParentId, Long newParentId) {
-        if (oldParentId == null) {
-            return newParentId + "." + lineage;
-        }
-        return lineage.replaceAll(oldParentId.toString(), newParentId.toString());
+    private String updateLineage(AddressLevel location, String parentLineage) {
+        return parentLineage + "." + location.getId();
     }
 
-    private void updateDescendantLocationLineage(List<AddressLevel> children, Long oldId, Long newId) {
-        if (children.isEmpty()) {
-            return;
-        } else {
+    private void updateDescendantLocationLineage(List<AddressLevel> children, String parentLineage) {
+        if (!children.isEmpty()) {
             children.forEach(child -> {
-                String lineage = child.getLineage();
-                child.setLineage(updateLineage(lineage, oldId, newId));
+                child.setLineage(updateLineage(child, parentLineage));
                 locationRepository.save(child);
-                updateDescendantLocationLineage(locationRepository.findAllByParent(child), oldId, newId);
+                updateDescendantLocationLineage(locationRepository.findAllByParent(child), child.getLineage());
             });
         }
     }
@@ -222,17 +222,42 @@ public class LocationService implements ScopeAwareService {
                 || (!location.isTopLevel() && parent != null && !parent.containsSubLocationExcept(title, type, location));
     }
 
-    public AddressLevelType createAddressLevelType(AddressLevelTypeContract contract) {
+    public AddressLevelType findAddressLevelTypeByName(String name, String excludeUuid) {
+        AddressLevelType existingType = addressLevelTypeRepository.findByNameIgnoreCaseAndIsVoidedFalse(name);
+        if (existingType != null && (excludeUuid == null || !existingType.getUuid().equals(excludeUuid))) {
+            return existingType;
+        }
+        return null;
+    }
+
+    public AddressLevelType createAddressLevelType(Organisation organisation, AddressLevelTypeContract contract) {
+        // Interactive paths (admin create/update) cascade a void to the type's locations so it syncs to devices.
+        return createAddressLevelType(organisation, contract, true);
+    }
+
+    public AddressLevelType createAddressLevelType(Organisation organisation, AddressLevelTypeContract contract, boolean cascadeVoidedLocations) {
+        // Validate name uniqueness - moved to controller to provide better error messages for API consumers
+
         AddressLevelType addressLevelType = addressLevelTypeRepository.findByUuid(contract.getUuid());
         if (addressLevelType == null) {
             addressLevelType = new AddressLevelType();
             addressLevelType.setUuid(contract.getUuid());
         }
+        boolean wasVoidedBefore = addressLevelType.isVoided();
         if (contract.getUuid() == null)
             addressLevelType.setUuid(UUID.randomUUID().toString());
+        if (ValidationUtil.checkNullOrEmptyOrContainsDisallowedCharacters(contract.getName(), ValidationUtil.COMMON_INVALID_CHARS_PATTERN)) {
+            throw new ValidationException(String.format("Invalid Location Type name %s", contract.getName()));
+        }
         addressLevelType.setName(contract.getName());
+        if (ValidationUtil.checkNull(contract.getLevel())) {
+            throw new ValidationException(String.format("Invalid Location Type level %s", contract.getLevel()));
+        }
         addressLevelType.setLevel(contract.getLevel());
         addressLevelType.setVoided(contract.isVoided());
+        // Clean up references in custom registration locations
+        organisationConfigService.removeVoidedAddressLevelTypeFromCustomRegistrationLocations(organisation, addressLevelType.getUuid());
+
         AddressLevelType parent = null;
         if (contract.getParent() != null && StringUtils.hasText(contract.getParent().getName())) {
             parent = addressLevelTypeRepository.findByName(contract.getParent().getName());
@@ -244,6 +269,19 @@ public class LocationService implements ScopeAwareService {
         }
         addressLevelType.setParent(parent);
         addressLevelTypeRepository.save(addressLevelType);
+
+        // When a type transitions to voided, cascade the void to its locations so the void
+        // syncs to devices (#871). The lowestAddressLevelType config keeps referencing the
+        // voided type on purpose - pruning it would orphan locations already on devices.
+        //
+        // NOT on the bundle-import path: a config bundle carries the source env's voided types AND its
+        // locations.json separately, so the target's location void state must come from locations.json,
+        // not be inferred here. Cascading on import would mass-void locations of a type that is voided in
+        // the source env but active (with live locations) in the target - silent operational-data loss.
+        if (cascadeVoidedLocations && !wasVoidedBefore && addressLevelType.isVoided()) {
+            Long lastModifiedById = UserContextHolder.getUserContext().getUser().getId();
+            locationRepository.voidLocationsByAddressLevelTypeId(addressLevelType.getId(), lastModifiedById);
+        }
         return addressLevelType;
     }
 
@@ -261,11 +299,11 @@ public class LocationService implements ScopeAwareService {
     @Override
     public boolean isScopeEntityChanged(DateTime lastModifiedDateTime, String typeUUID) {
         User user = UserContextHolder.getUserContext().getUser();
-        return isChangedByCatchment(user, lastModifiedDateTime, SyncParameters.SyncEntityName.Location);
+        return isChangedByCatchment(user, lastModifiedDateTime, SyncEntityName.Location);
     }
 
     @Override
-    public OperatingIndividualScopeAwareRepository repository() {
+    public OperatingIndividualScopeAwareRepository<AddressLevel> repository() {
         return locationRepository;
     }
 
@@ -273,7 +311,7 @@ public class LocationService implements ScopeAwareService {
         Concept concept = formElement.getConcept();
         List<String> lowestLevelUuids = (List<String>) concept.getKeyValues().get(KeyType.lowestAddressLevelTypeUUIDs).getValue();
         List<AddressLevelType> lowestLevels = lowestLevelUuids.stream()
-                .map(uuid -> addressLevelTypeRepository.findByUuid(uuid))
+                .map(addressLevelTypeRepository::findByUuid)
                 .collect(Collectors.toList());
         if (formElement.getType().equals(FormElementType.MultiSelect.name())) {
             String[] providedAnswers = S.splitMultiSelectAnswer(answerValue);
@@ -295,8 +333,44 @@ public class LocationService implements ScopeAwareService {
         return locationRepository.findLocationProjectionByTitleIgnoreCaseAndTypeIdAndParentId(searchRequest.getTitle(), searchRequest.getAddressLevelTypeId(), searchRequest.getParentId(), searchRequest.getPageable());
     }
 
+    public Page<LocationProjection> findByAncestorAndFilters(String title, Integer typeId, Long ancestorId, org.springframework.data.domain.Pageable pageable) {
+        String lineagePrefix = null;
+        if (ancestorId != null) {
+            AddressLevel ancestor = locationRepository.findById(ancestorId)
+                    .orElseThrow(() -> new IllegalArgumentException("Unknown ancestor id: " + ancestorId));
+            lineagePrefix = ancestor.getLineage();
+        }
+        return locationRepository.findLocationProjectionByAncestorAndFilters(title, typeId, lineagePrefix, pageable);
+    }
+
     public List<LocationProjection> getParents(String uuid, Long maxLevelTypeId) {
         return maxLevelTypeId == null ?
-         locationRepository.getParents(uuid) : locationRepository.getParentsWithMaxLevelTypeId(uuid, maxLevelTypeId);
+                locationRepository.getParents(uuid) : locationRepository.getParentsWithMaxLevelTypeId(uuid, maxLevelTypeId);
+    }
+
+    public void createAddressLevelTypes(Organisation organisation, AddressLevelTypeContract[] addressLevelTypeContracts) {
+        // First, validate for case-insensitive duplicate names across all contracts
+        Map<String, AddressLevelTypeContract> nameToContractMap = new HashMap<>();
+        for (AddressLevelTypeContract contract : addressLevelTypeContracts) {
+            String name = contract.getName();
+            if (name != null) {
+                // Check for duplicates within the batch
+                if (nameToContractMap.containsKey(name.toLowerCase())) {
+                    throw new ValidationException(String.format("Duplicate location type name '%s' found in the request", name));
+                }
+                // Check for existing duplicates in the database (excluding the contract's own UUID if it's an update)
+                AddressLevelType existingType = findAddressLevelTypeByName(name, contract.getUuid());
+                if (existingType != null) {
+                    throw new ValidationException(String.format("Location type with name '%s' already exists", name));
+                }
+                nameToContractMap.put(name.toLowerCase(), contract);
+            }
+        }
+
+        // Once validated, process all contracts. Bundle import must NOT cascade-void locations (#871):
+        // location void state is carried by locations.json, not inferred from a source-env-voided type.
+        for (AddressLevelTypeContract addressLevelTypeContract : addressLevelTypeContracts) {
+            this.createAddressLevelType(organisation, addressLevelTypeContract, false);
+        }
     }
 }

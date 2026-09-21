@@ -3,15 +3,18 @@ package org.avni.server.web;
 import org.avni.server.config.AvniKeycloakConfig;
 import org.avni.server.config.CognitoConfig;
 import org.avni.server.config.IdpType;
+import org.avni.server.web.util.AvniAiConfig;
 import org.keycloak.OAuth2Constants;
 import org.keycloak.representations.adapters.config.AdapterConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
+@Transactional(readOnly = true)
 public class AuthDetailsController {
     private final AvniKeycloakConfig avniKeycloakConfig;
     private final AdapterConfig adapterConfig;
@@ -19,6 +22,30 @@ public class AuthDetailsController {
 
     @Value("${avni.idp.type}")
     private IdpType idpType;
+
+    @Value("${avni.webapp.timeout.in.minutes}")
+    private int webAppTimeoutInMinutes;
+
+    @Value("${avni.environment}")
+    private String avniEnvironment;
+
+    @Value("${avni.mcp.server.url}")
+    private String mcpServerUrl;
+
+    @Value("${avni.copilot.token}")
+    private String copilotToken;
+
+    @Value("${avni.copilot.enabled}")
+    private boolean copilotEnabled;
+
+    @Value("${avni.base.url}")
+    private String baseUrl;
+
+    @Value("${avni.showTemplates}")
+    private boolean showTemplates;
+
+    @Value("${avni.copilot.form.validation.api.key}")
+    private String copilotFormValidationApiKey;
 
     @Autowired
     public AuthDetailsController(AvniKeycloakConfig avniKeycloakConfig, AdapterConfig adapterConfig, CognitoConfig cognitoConfig) {
@@ -40,20 +67,24 @@ public class AuthDetailsController {
         String keycloakAuthServerUrl = adapterConfig.getAuthServerUrl();
         String cognitoConfigPoolId = cognitoConfig.getPoolId();
         String cognitoConfigClientId = cognitoConfig.getClientId();
-        return new AuthDetailsController.CompositeIDPDetails(keycloakAuthServerUrl, keycloakClientId,
-                keycloakGrantType, keycloakScope, avniKeycloakConfig.getRealm(), cognitoConfigPoolId, cognitoConfigClientId, idpType);
+        AvniAiConfig avniAiConfig = AvniAiConfig.create(copilotToken, copilotEnabled, baseUrl, mcpServerUrl, showTemplates, copilotFormValidationApiKey);
+        return new AuthDetailsController.CompositeIDPDetails( keycloakAuthServerUrl, keycloakClientId,
+                keycloakGrantType, keycloakScope, avniKeycloakConfig.getRealm(), cognitoConfigPoolId,
+                cognitoConfigClientId, idpType, webAppTimeoutInMinutes, avniEnvironment, avniAiConfig);
     }
 
     public static class CompositeIDPDetails {
+        private final GenericConfig genericConfig;
         private final IdpType idpType;
         private final Keycloak keycloak;
         private final Cognito cognito;
 
-        public CompositeIDPDetails(String authServerUrl, String keycloakClientId, String grantType, String scope, String keycloakRealm,
-                                   String poolId, String clientId, IdpType idpType) {
+        public CompositeIDPDetails( String authServerUrl, String keycloakClientId, String grantType, String scope, String keycloakRealm,
+                                    String poolId, String clientId, IdpType idpType, int webAppTimeoutInMinutes, String avniEnvironment, AvniAiConfig avniAiConfig) {
             this.idpType = idpType;
             this.keycloak = new Keycloak(authServerUrl, keycloakClientId, grantType, scope, keycloakRealm);
             this.cognito = new Cognito(poolId, clientId);
+            this.genericConfig = new GenericConfig(webAppTimeoutInMinutes, avniEnvironment, avniAiConfig);
         }
 
         public Keycloak getKeycloak() {
@@ -66,6 +97,10 @@ public class AuthDetailsController {
 
         public IdpType getIdpType() {
             return idpType;
+        }
+
+        public GenericConfig getGenericConfig() {
+            return genericConfig;
         }
 
         public class Keycloak {
@@ -119,6 +154,30 @@ public class AuthDetailsController {
 
             public String getClientId() {
                 return clientId;
+            }
+        }
+
+        public static class GenericConfig {
+            private final int webAppTimeoutInMinutes;
+            private final String avniEnvironment;
+            private final AvniAiConfig avniAi;
+
+            public GenericConfig(int webAppTimeoutInMinutes, String avniEnvironment, AvniAiConfig avniAi) {
+                this.webAppTimeoutInMinutes = webAppTimeoutInMinutes;
+                this.avniEnvironment = avniEnvironment;
+                this.avniAi = avniAi;
+            }
+
+            public int getWebAppTimeoutInMinutes() {
+                return webAppTimeoutInMinutes;
+            }
+
+            public String getAvniEnvironment() {
+                return avniEnvironment;
+            }
+
+            public AvniAiConfig getAvniAi() {
+                return avniAi;
             }
         }
     }

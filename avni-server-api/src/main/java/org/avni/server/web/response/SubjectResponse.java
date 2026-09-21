@@ -2,14 +2,18 @@ package org.avni.server.web.response;
 
 import org.avni.server.dao.ConceptRepository;
 import org.avni.server.domain.AddressLevel;
+import org.avni.server.domain.Catchment;
 import org.avni.server.domain.GroupSubject;
 import org.avni.server.domain.Individual;
 import org.avni.server.service.ConceptService;
 import org.avni.server.service.S3Service;
-import org.jadira.usertype.spi.utils.lang.StringUtils;
+import org.avni.server.web.request.api.SubjectResponseOptions;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
 
 import java.net.URL;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static org.avni.server.web.api.CommonFieldNames.EXTERNAL_ID;
 
@@ -17,16 +21,18 @@ public class SubjectResponse extends LinkedHashMap<String, Object> {
 
     public static final String LOCATION_EXTERNAL_ID_DELIMITER = " ";
 
-    public static SubjectResponse fromSubject(Individual subject, boolean includeSubjectType, ConceptRepository conceptRepository, ConceptService conceptService, S3Service s3Service) {
+    public static SubjectResponse fromSubject(Individual subject, SubjectResponseOptions options, ConceptRepository conceptRepository, ConceptService conceptService, S3Service s3Service) {
         SubjectResponse subjectResponse = new SubjectResponse();
-        if (includeSubjectType) subjectResponse.put("Subject type", subject.getSubjectType().getName());
+        if (options.isIncludeSubjectType()) subjectResponse.put("Subject type", subject.getSubjectType().getName());
         subjectResponse.put("ID", subject.getUuid());
         subjectResponse.put("External ID", subject.getLegacyId());
         subjectResponse.put("Voided", subject.isVoided());
-        Response.putIfPresent(subjectResponse, "Registration location", subject.getRegistrationLocation());
+        Response.putIfPresent(subjectResponse, "Registration Coordinates", subject.getRegistrationLocation());
+        Response.putIfPresent(subjectResponse, "Subject location", subject.getSubjectLocation());
         subjectResponse.put("Registration date", subject.getRegistrationDate());
         putLocation(subject, subjectResponse);
         putRelatives(subject, subjectResponse);
+        if (options.isIncludeCatchments()) putCatchments(subject, subjectResponse);
 
         LinkedHashMap<String, Object> observations = new LinkedHashMap<>();
         Response.putIfPresent(observations, "First name", subject.getFirstName());
@@ -34,7 +40,7 @@ public class SubjectResponse extends LinkedHashMap<String, Object> {
             Response.putIfPresent(observations, "Middle name", subject.getMiddleName());
         Response.putIfPresent(observations, "Last name", subject.getLastName());
         if (subject.getSubjectType().isAllowProfilePicture()
-                && StringUtils.isNotEmpty(subject.getProfilePicture())) {
+                && !StringUtils.isEmpty(subject.getProfilePicture())) {
             URL url = s3Service.generateMediaDownloadUrl(subject.getProfilePicture());
             observations.put("Profile picture", url.toString());
         }
@@ -67,6 +73,23 @@ public class SubjectResponse extends LinkedHashMap<String, Object> {
             addressLevel = addressLevel.getParent();
         }
         subjectResponse.put("location", location);
+        if (subject.getAddressLevel() != null)
+            subjectResponse.put("Location ID", subject.getAddressLevel().getUuid());
+    }
+
+    private static void putCatchments(Individual subject, SubjectResponse subjectResponse) {
+        List<String> catchments = new ArrayList<>();
+        if (subject.getAddressLevel() == null) {
+            return;
+        }
+        Set<Catchment> virtualCatchments = subject.getAddressLevel().getVirtualCatchments();
+        if (CollectionUtils.isEmpty(virtualCatchments)) {
+            return;
+        }
+        for (Catchment catchment : virtualCatchments) {
+            catchments.add(catchment.getName());
+        }
+        subjectResponse.put("catchments", catchments);
     }
 
     private static void putAddressLevel(Map<String, String> map, AddressLevel addressLevel) {
@@ -74,9 +97,9 @@ public class SubjectResponse extends LinkedHashMap<String, Object> {
         map.put(String.join(LOCATION_EXTERNAL_ID_DELIMITER, addressLevel.getTypeString(), EXTERNAL_ID), addressLevel.getLegacyId());
     }
 
-    public static SubjectResponse fromSubject(Individual subject, boolean subjectTypeRequested, ConceptRepository conceptRepository, ConceptService conceptService, List<GroupSubject> groups, S3Service s3Service) {
-        SubjectResponse subjectResponse = fromSubject(subject, subjectTypeRequested, conceptRepository, conceptService, s3Service);
-        subjectResponse.put("Groups", groups.stream().map(GroupSubject::getGroupSubjectUUID));
+    public static SubjectResponse fromSubject(Individual subject, SubjectResponseOptions options, ConceptRepository conceptRepository, ConceptService conceptService, List<GroupSubject> groups, S3Service s3Service) {
+        SubjectResponse subjectResponse = fromSubject(subject, options, conceptRepository, conceptService, s3Service);
+        subjectResponse.put("Groups", groups.stream().filter(group -> !group.isVoided()).map(GroupSubject::getGroupSubjectUUID).collect(Collectors.toList()));
         return subjectResponse;
     }
 }

@@ -1,6 +1,7 @@
 package org.avni.server.service;
 
 import org.avni.server.dao.*;
+import org.avni.server.domain.sync.SyncEntityName;
 import org.joda.time.DateTime;
 import org.avni.server.domain.Comment;
 import org.avni.server.domain.CommentThread;
@@ -15,11 +16,10 @@ import java.util.HashSet;
 import java.util.Set;
 
 @Service
-public class CommentThreadService implements ScopeAwareService {
-
-    private CommentThreadRepository commentThreadRepository;
-    private IndividualRepository individualRepository;
-    private SubjectTypeRepository subjectTypeRepository;
+public class CommentThreadService implements ScopeAwareService<CommentThread> {
+    private final CommentThreadRepository commentThreadRepository;
+    private final IndividualRepository individualRepository;
+    private final SubjectTypeRepository subjectTypeRepository;
 
     @Autowired
     public CommentThreadService(CommentThreadRepository commentThreadRepository, IndividualRepository individualRepository, SubjectTypeRepository subjectTypeRepository) {
@@ -44,24 +44,24 @@ public class CommentThreadService implements ScopeAwareService {
             comments.add(comment);
         });
         commentThread.setComments(comments);
-        return commentThreadRepository.save(commentThread);
+        return commentThreadRepository.saveEntity(commentThread);
     }
 
     public CommentThread resolveThread(CommentThread commentThread) {
         commentThread.setStatus(CommentThread.CommentThreadStatus.Resolved);
         commentThread.setResolvedDateTime(new DateTime());
-        return commentThreadRepository.save(commentThread);
+        return commentThreadRepository.saveEntity(commentThread);
     }
 
     @Override
     public boolean isScopeEntityChanged(DateTime lastModifiedDateTime, String subjectTypeUUID) {
         SubjectType subjectType = subjectTypeRepository.findByUuid(subjectTypeUUID);
         User user = UserContextHolder.getUserContext().getUser();
-        return subjectType != null && isChangedBySubjectTypeRegistrationLocationType(user, lastModifiedDateTime, subjectType.getId(), subjectType, SyncParameters.SyncEntityName.CommentThread);
+        return subjectType != null && isChangedBySubjectTypeRegistrationLocationType(user, lastModifiedDateTime, subjectType.getId(), subjectType, SyncEntityName.CommentThread);
     }
 
     @Override
-    public OperatingIndividualScopeAwareRepository repository() {
+    public OperatingIndividualScopeAwareRepository<CommentThread> repository() {
         return commentThreadRepository;
     }
 }

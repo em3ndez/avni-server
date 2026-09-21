@@ -1,5 +1,6 @@
 package org.avni.server.service;
 
+import com.amazonaws.services.cognitoidp.model.UserNotFoundException;
 import com.auth0.jwk.SigningKeyNotFoundException;
 import org.avni.server.config.IdpType;
 import org.avni.server.dao.OrganisationRepository;
@@ -20,6 +21,9 @@ public class IdpServiceFactory {
 
     @Autowired(required = false)
     private KeycloakIdpService keycloakIdpService;
+
+    @Autowired(required = false)
+    private NoopIdpService noopIdpService;
 
     @Autowired(required = false)
     private CognitoAuthServiceImpl cognitoAuthService;
@@ -46,6 +50,16 @@ public class IdpServiceFactory {
         this.organisationConfigService = organisationConfigService;
     }
 
+    public IdpService getIdpService() {
+        if (idpType.equals(IdpType.none))
+            return noopIdpService;
+
+        if (cognitoIdpService != null)
+            return cognitoIdpService;
+
+        return keycloakIdpService;
+    }
+
     public IdpService getIdpService(Organisation organisation) {
         OrganisationConfig.Settings settings = getSettings(organisation);
 
@@ -53,12 +67,15 @@ public class IdpServiceFactory {
             return keycloakIdpService;
 
         if (idpType.equals(IdpType.none))
-            return new NoopIdpService();
+            return noopIdpService;
 
         return cognitoIdpService;
     }
 
-    public IdpService getIdpService(User user) {
+    public IdpService getIdpService(User user, boolean isAdmin) {
+        if (isAdmin) {
+            return getIdpService();
+        }
         Organisation organisation = organisationRepository.findOne(user.getOrganisationId());
         return getIdpService(organisation);
     }
@@ -100,11 +117,25 @@ public class IdpServiceFactory {
                 return keycloakAuthService.getUserFromToken(token);
             }
         }
+
+        @Override
+        public String generateTokenForUser(String username, String password) {
+            try {
+                return cognitoAuthService.generateTokenForUser(username, password);
+            } catch (UserNotFoundException e) {
+                return keycloakAuthService.generateTokenForUser(username, password);
+            }
+        }
     }
 
     public static class NoIAMAuthService implements IAMAuthService {
         @Override
         public User getUserFromToken(String token) throws SigningKeyNotFoundException {
+            return null;
+        }
+
+        @Override
+        public String generateTokenForUser(String username, String password) {
             return null;
         }
     }

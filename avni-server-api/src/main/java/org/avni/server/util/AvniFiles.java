@@ -1,7 +1,14 @@
 package org.avni.server.util;
 
+import org.apache.commons.csv.*;
+import org.apache.tika.Tika;
+import org.apache.tika.config.TikaConfig;
+import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.metadata.TikaCoreProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
@@ -13,16 +20,45 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.Iterator;
-import java.util.UUID;
+import java.util.*;
+import java.util.List;
+import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 import static java.lang.String.format;
 
 public class AvniFiles {
+    public static final String APP_ZIP = "application/zip";
+    public static final String APP_X_ZIP_COMPRESSED = "application/x-zip-compressed";
 
     private static final Logger logger = LoggerFactory.getLogger(AvniFiles.class.getName());
+    private static final Map<String, String> fileExtensionMap;
+
+    static {
+        fileExtensionMap = new HashMap<>();
+        fileExtensionMap.put(APP_ZIP, "zip");
+        fileExtensionMap.put(APP_X_ZIP_COMPRESSED, "zip");
+        fileExtensionMap.put("text/csv", "csv");
+    }
+
+    public static final List<String> ZipFiles = Arrays.asList(APP_ZIP, APP_X_ZIP_COMPRESSED);
+
+    static public ImageType guessImageType(File tempSourceFile) throws IOException {
+        ImageType imageType = AvniFiles.guessImageTypeFromStream(tempSourceFile);
+        if (ImageType.Unknown == imageType) {
+            Tika tika = new Tika();
+            String mimeType = tika.detect(tempSourceFile);
+            return switch (mimeType) {
+                case "image/jpeg" -> ImageType.JPEG;
+                case "image/png" -> ImageType.PNG;
+                case "image/gif" -> ImageType.GIF;
+                case "image/bmp" -> ImageType.BMP;
+                default -> ImageType.Unknown;
+            };
+        }
+        return imageType;
+    }
 
     /**
      * Sources:
@@ -109,15 +145,16 @@ public class AvniFiles {
     /**
      * Sources:
      * https://stackoverflow.com/a/12164026
-     *
+     * <p>
      * Gets image dimensions for given file
+     *
      * @param imgFile image file
      * @return dimensions of image
      * @throws IOException if the file is not a known image
      */
     public static Dimension getImageDimension(File imgFile, ImageType type) throws IOException {
         Iterator<ImageReader> iter = ImageIO.getImageReadersBySuffix(type.toString().toLowerCase());
-        while(iter.hasNext()) {
+        while (iter.hasNext()) {
             ImageReader reader = iter.next();
             try {
                 ImageInputStream stream = new FileImageInputStream(imgFile);
@@ -135,23 +172,59 @@ public class AvniFiles {
         throw new IOException("Not a known image file: " + imgFile.getAbsolutePath());
     }
 
-    private static File getFile(MultipartFile file, File tempFile) throws IOException {
-        try {
-            FileOutputStream fos;
-            fos = new FileOutputStream(tempFile);
-            fos.write(file.getBytes());
-            fos.close();
-        } catch (IOException e) {
-            e.printStackTrace();
-            throw new IOException(
-                    format("Unable to create temp file %s. Error: %s", file.getOriginalFilename(), e.getMessage()));
+    public static void validateFile(MultipartFile file, List<String> expectedMimeTypes) throws IOException {
+        String fileExtension = fileExtensionMap.getOrDefault(expectedMimeTypes.get(0), "");
+        validateFileName(file.getOriginalFilename(), fileExtension);
+        validateMimeTypes(file, expectedMimeTypes);
+    }
+
+    public static void validateFileName(String fileName, String extension) {
+        assertTrue(!StringUtils.isEmpty(fileName), "File name is empty");
+        assertTrue(fileName.split("[.]").length == 2, "Double extension file detected");
+        assertTrue(fileName.endsWith("." + extension), format("Expected file extension: %s, Got %s", extension, fileName.split("[.]")[1]));
+    }
+
+    static void validateMimeType(MultipartFile file, String expectedMimeType) throws IOException {
+        AvniFiles.validateMimeTypes(file, Collections.singletonList(expectedMimeType));
+    }
+
+    static void validateMimeTypes(MultipartFile file, List<String> expectedMimeTypes) throws IOException {
+        String expectedMimeTypeString = String.join(",", expectedMimeTypes);
+        boolean contentTypeMatch = expectedMimeTypes.stream().anyMatch(mimeType -> mimeType.equals(file.getContentType()));
+        assertTrue(contentTypeMatch, format("Expected content type: %s, Got, %s", expectedMimeTypeString, file.getContentType()));
+        String actualMimeType = detectMimeType(file);
+        boolean mimeTypeMatch = expectedMimeTypes.stream().anyMatch(mimeType -> mimeType.equals(actualMimeType));
+        String additionalErrorText = actualMimeType.equals("application/vnd.ms-excel") && expectedMimeTypes.contains("text/csv") ? "Retry using Chrome browser." : "";
+        assertTrue(mimeTypeMatch, format("Expected mimetype: %s, Got, %s. %s", expectedMimeTypeString, actualMimeType, additionalErrorText));
+    }
+
+    private static File cleanCsv(File unverifiedFile) throws IOException {
+        CSVFormat csvFormat = CSVFormat.Builder.create().setQuoteMode(QuoteMode.ALL_NON_NULL).build();
+        CSVParser records = csvFormat.parse(new FileReader(unverifiedFile));
+        File outputCsv = File.createTempFile(UUID.randomUUID().toString(), ".csv");
+
+        CSVPrinter printer = new CSVPrinter(new FileWriter(outputCsv), csvFormat);
+        for (CSVRecord csvRecord : records) {
+            Stream<String> record = Arrays.stream(csvRecord.values()).map(s -> {
+                if (s != null && (s.startsWith("=") || s.startsWith("-") || s.startsWith("+") || s.startsWith("@"))) {
+                    return format("\t%s",s);
+                }
+                return s;
+            });
+            printer.printRecord(record);
         }
-        return tempFile;
+        printer.close();
+
+        return outputCsv;
+    }
+
+    private static boolean isCsv(String extension) {
+        return extension.equals(".csv");
     }
 
     public static File convertMultiPartToFile(MultipartFile file, String ext) throws IOException {
-        File tempFile = File.createTempFile(UUID.randomUUID().toString(), ext);
-        return getFile(file, tempFile);
+        File tempFile = getFile(file, File.createTempFile(UUID.randomUUID().toString(), ext));
+        return isCsv(ext) ? cleanCsv(tempFile) : tempFile;
     }
 
     public static File convertMultiPartToZip(MultipartFile file) throws IOException {
@@ -195,5 +268,46 @@ public class AvniFiles {
             throw new IOException("Bad zip entry: " + zipEntry.getName());
         }
         return normalizePath;
+    }
+
+    public static void assertTrue(boolean value, String errorMessage) {
+        if (!value) {
+            throw new BadRequestError(errorMessage);
+        }
+    }
+
+    public static String detectMimeType(MultipartFile file) throws IOException {
+        TikaConfig tika = TikaConfig.getDefaultConfig();
+        Metadata metadata = new Metadata();
+        metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, file.getOriginalFilename());
+        return String.valueOf(tika
+                .getDetector()
+                .detect(TikaInputStream.get(file.getInputStream()), metadata));
+    }
+
+    private static File getFile(MultipartFile file, File tempFile) throws IOException {
+        try {
+            FileOutputStream fos;
+            fos = new FileOutputStream(tempFile);
+            fos.write(file.getBytes());
+            fos.close();
+        } catch (IOException e) {
+            logger.error(String.format("Could not read file: %s", tempFile), e);
+            throw new IOException(
+                    format("Unable to create temp file %s. Error: %s", file.getOriginalFilename(), e.getMessage()));
+        }
+        return tempFile;
+    }
+
+    public static String buildVideoTargetFilePath(String folderName, String mimeType, String uuid) {
+        String fileExtension = switch (mimeType) {
+            case "video/mp4" -> ".mp4";
+            case "video/webm" -> ".webm";
+            case "video/quicktime" -> ".mov";
+            case "video/x-msvideo" -> ".avi";
+            case "video/mpeg" -> ".mpeg";
+            default -> ".mp4"; // default fallback
+        };
+        return format("%s/%s%s", folderName, uuid, fileExtension);
     }
 }

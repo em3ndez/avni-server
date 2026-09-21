@@ -1,13 +1,19 @@
 package org.avni.server.domain.factory.metadata;
 
+import org.avni.server.application.KeyValues;
 import org.avni.server.domain.Concept;
 import org.avni.server.domain.ConceptAnswer;
 import org.avni.server.domain.ConceptDataType;
 
 import java.util.Arrays;
+import java.util.UUID;
 
 public class ConceptBuilder {
     private final Concept concept = new Concept();
+
+    public ConceptBuilder() {
+        withUuid(UUID.randomUUID().toString());
+    }
 
     public ConceptBuilder withUuid(String uuid) {
         concept.setUuid(uuid);
@@ -35,6 +41,11 @@ public class ConceptBuilder {
 
     public ConceptBuilder withId(long id) {
         concept.setId(id);
+        return this;
+    }
+
+    public ConceptBuilder withKeyValues(KeyValues keyValues) {
+        concept.setKeyValues(keyValues);
         return this;
     }
 }

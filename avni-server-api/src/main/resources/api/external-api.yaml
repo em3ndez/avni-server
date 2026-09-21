@@ -1,13 +1,19 @@
+---
 openapi: 3.0.0
 info:
-  description: This is for API consumers of Avni
-  version: "1.0.0"
   title: Avni API
+  description: This is for API consumers of Avni
   contact:
     email: avniproject@googlegroups.com
   license:
     name: AGPL 3.0
-    url: 'https://opensource.org/licenses/AGPL-3.0'
+    url: https://opensource.org/licenses/AGPL-3.0
+  version: 1.0.0
+servers:
+  - url: https://app.avniproject.org/
+    description: Samanvay hosted production server (example)
+  - url: https://staging.avniproject.org/
+    description: Samanvay hosted staging server (example)
 tags:
   - name: Subject
 paths:
@@ -16,55 +22,76 @@ paths:
       tags:
         - Subject
       summary: Get paged list of subjects
-      operationId: subjects
       description: |
         By passing in the appropriate options, you can get the subjects in set of pages
+      operationId: subjects
       parameters:
-        - in: query
-          name: lastModifiedDateTime
-          description: date-time in ISO datetime format. All the subjects which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. "2000-10-31T01:30:00.000Z".
+        - name: lastModifiedDateTime
+          in: query
+          description: "date-time in ISO datetime format. All the subjects which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\"."
           required: true
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: subjectType
+        - name: subjectType
+          in: query
           description: subject type
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: concepts
-          description: Allows to search by concepts. Remember that '{' and '}' are not valid in a url, and need to be escaped with %7B and %7D respectively.
-          example: '{"Diagnosis": "Diabetes", "Blood Group": "B+"}'
+        - name: includeCatchments
+          in: query
           required: false
+          style: form
+          explode: true
+          description: "Iff true, the catchment details of the subject will be included in the response."
+          schema:
+            type: boolean
+        - name: concepts
+          in: query
+          description: "Allows to search by concepts. Remember that '{' and '}' are not valid in a url, and need to be escaped with %7B and %7D respectively."
+          required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: locationIds
+          example: "{\"Diagnosis\": \"Diabetes\", \"Blood Group\": \"B+\"}"
+        - name: locationIds
+          in: query
           description: comma seperated location names from higher level to lower level
           required: false
+          style: form
+          explode: true
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
-          description: successful, a page of subjects
+        "200":
+          description: "successful, a page of subjects"
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/ResponsePage'
-                properties:
-                  content:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Subject'
-        '400':
+                $ref: '#/components/schemas/inline_response_200'
+        "400":
           description: bad input parameter
   /api/subject/{ID}:
     get:
@@ -75,26 +102,147 @@ paths:
         Provide the ID of the subject. The ID is in UUID format, the external id used by Avni.
         OR provide the ExternalID of the Subject. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: includeCatchments
+          in: query
+          required: false
+          style: form
+          explode: true
+          description: "Iff true, the catchment details of the subject will be included in the response."
+          schema:
+            type: boolean
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Subject'
-        '400':
+        "400":
           description: bad input parameter
+    put:
+      tags:
+        - Subject
+      summary: Updates all attributes of an existing subject. If no value is specified for an attribute then it would be updated to null/undefined.
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+        - name: includeCatchments
+          in: query
+          required: false
+          style: form
+          explode: true
+          description: "Iff true, the catchment details of the subject will be included in the response."
+          schema:
+            type: boolean
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubjectBody'
+        required: true
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subject'
+    patch:
+      tags:
+        - Subject
+      summary: Updates subject with only the values provided in the request. If no value is specified for an attribute then it would be left unchanged.
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+        - name: includeCatchments
+          in: query
+          required: false
+          style: form
+          explode: true
+          description: "Iff true, the catchment details of the subject will be included in the response."
+          schema:
+            type: boolean
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubjectBody'
+        required: true
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subject'
     delete:
       tags:
         - Subject
@@ -103,76 +251,87 @@ paths:
         Provide the ID of the subject. The ID is in UUID format, the external id used by Avni.
         OR provide the ExternalID of the Subject. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+        - name: includeCatchments
+          in: query
+          required: false
+          style: form
+          explode: true
+          description: "Iff true, the catchment details of the subject will be included in the response."
+          schema:
+            type: boolean
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Subject'
-        '400':
+        "400":
           description: bad input parameter
-        '404':
+        "404":
           description: entity not found
-    put:
-      tags:
-        - Subject
-      summary: Updates an existing subject
-      parameters:
-        - in: path
-          name: ID
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - in: header
-          name: auth-token
-          schema:
-            type: string
-            description: token provided by cognito
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SubjectBody'
-      responses:
-        '200':
-          description: successful
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Subject'
   /api/subject:
     post:
       tags:
         - Subject
       summary: Creates a new subject
       parameters:
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+        - name: includeCatchments
+          in: query
+          required: false
+          style: form
+          explode: true
+          description: "Iff true, the catchment details of the subject will be included in the response."
+          schema:
+            type: boolean
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/SubjectBody'
+        required: true
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
@@ -186,43 +345,54 @@ paths:
       description: |
         By passing in the appropriate options, you can get the program enrolments in set of pages. There are three use cases supported, get a list of all enrolments, get a list of all enrolments within a program, and get a list of enrolments for a subject and program.
       parameters:
-        - in: query
-          name: lastModifiedDateTime
-          description: date-time in ISO datetime format. All the program enrolments which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. "2000-10-31T01:30:00.000Z". It is mandatory unless subject and programs are are specified
+        - name: lastModifiedDateTime
+          in: query
+          description: "date-time in ISO datetime format. All the program enrolments which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\". It is mandatory unless subject and programs are are specified"
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: program
+        - name: program
+          in: query
           description: program name. mandatory if subject is specified.
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: subject
+        - name: subject
+          in: query
           description: external id of the subject
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
-          description: successful, a page of program enrolments
+        "200":
+          description: "successful, a page of program enrolments"
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/ResponsePage'
-                properties:
-                  content:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ProgramEnrolment'
-        '400':
+                $ref: '#/components/schemas/inline_response_200_1'
+        "400":
           description: bad input parameter
   /api/programEnrolment/{ID}:
     get:
@@ -233,26 +403,81 @@ paths:
         Provide the ID of the program enrolment. The ID is in UUID format, the external id used by Avni
         OR provide the ExternalID of the Program Enrolment. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProgramEnrolment'
-        '400':
+        "400":
           description: bad input parameter
+    put:
+      tags:
+        - Program Enrolment
+      summary: Updates an existing program enrolment
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProgramEnrolmentBody'
+        required: true
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgramEnrolment'
     delete:
       tags:
         - Program Enrolment
@@ -261,76 +486,71 @@ paths:
         Provide the ID of the program enrolment. The ID is in UUID format, the external id used by Avni
         OR provide the ExternalID of the Program Enrolment. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProgramEnrolment'
-        '400':
+        "400":
           description: bad input parameter
-        '404':
+        "404":
           description: entity not found
-    put:
-      tags:
-        - Program Enrolment
-      summary: Updates an existing program enrolment
-      parameters:
-        - in: path
-          name: ID
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - in: header
-          name: auth-token
-          schema:
-            type: string
-            description: token provided by cognito
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ProgramEnrolmentBody'
-      responses:
-        '200':
-          description: successful
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProgramEnrolment'
   /api/programEnrolment:
     post:
       tags:
         - Program Enrolment
       summary: Creates a new program enrolment
       parameters:
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/ProgramEnrolmentBody'
+        required: true
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
@@ -344,44 +564,55 @@ paths:
       description: |
         By passing in the appropriate options, you can get the program encounters in set of pages
       parameters:
-        - in: query
-          name: lastModifiedDateTime
-          description: date-time in ISO datetime format. All the program encounters which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. "2000-10-31T01:30:00.000Z".
+        - name: lastModifiedDateTime
+          in: query
+          description: "date-time in ISO datetime format. All the program encounters which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\"."
           required: true
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: encounter type
+        - name: encounterType
+          in: query
           description: program encounter type name
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: programEnrolmentId
+        - name: programEnrolmentId
+          in: query
           description: ID of program enrolment
           required: false
+          style: form
+          explode: true
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
-          description: successful, a page of program encounters
+        "200":
+          description: "successful, a page of program encounters"
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/ResponsePage'
-                properties:
-                  content:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/ProgramEncounter'
-        '400':
+                $ref: '#/components/schemas/inline_response_200_2'
+        "400":
           description: bad input parameter
   /api/programEncounter/{ID}:
     get:
@@ -392,26 +623,81 @@ paths:
         Provide the ID of the program encounter. The ID is in UUID format, the external id used by Avni
         OR provide the ExternalID of the program encounter. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProgramEncounter'
-        '400':
+        "400":
           description: bad input parameter
+    put:
+      tags:
+        - Program Encounter
+      summary: Updates an existing program encounter
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProgramEncounterBody'
+        required: true
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProgramEncounter'
     delete:
       tags:
         - Program Encounter
@@ -420,76 +706,71 @@ paths:
         Provide the ID of the program encounter. The ID is in UUID format, the external id used by Avni
         OR provide the ExternalID of the program encounter. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ProgramEncounter'
-        '400':
+        "400":
           description: bad input parameter
-        '404':
+        "404":
           description: entity not found
-    put:
-      tags:
-        - Program Encounter
-      summary: Updates an existing program encounter
-      parameters:
-        - in: path
-          name: ID
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - in: header
-          name: auth-token
-          schema:
-            type: string
-            description: token provided by cognito
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ProgramEncounterBody'
-      responses:
-        '200':
-          description: successful
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProgramEncounter'
   /api/programEncounter:
     post:
       tags:
         - Program Encounter
       summary: Creates a new program encounter
       parameters:
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/ProgramEncounterBody'
+        required: true
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
@@ -503,51 +784,64 @@ paths:
       description: |
         By passing in the appropriate options, you can get the subject encounters in set of pages.
       parameters:
-        - in: query
-          name: lastModifiedDateTime
-          description: date-time in ISO datetime format. All the subject encounters which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. "2000-10-31T01:30:00.000Z".
+        - name: lastModifiedDateTime
+          in: query
+          description: "date-time in ISO datetime format. All the subject encounters which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\"."
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: encounter type
+        - name: encounterType
+          in: query
           description: subject encounter type name
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: subjectId
+        - name: subjectId
+          in: query
           description: ID of the subject
           required: false
+          style: form
+          explode: true
           schema:
             type: string
             format: uuid
-        - in: query
-          name: concepts
-          description: Allows to search by concepts. Remember that '{' and '}' are not valid in a url, and need to be escaped with %7B and %7D respectively.
-          example: '{"Diagnosis": "Diabetes", "Blood Group": "B+"}'
+        - name: concepts
+          in: query
+          description: "Allows to search by concepts. Remember that '{' and '}' are not valid in a url, and need to be escaped with %7B and %7D respectively."
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: header
-          name: auth-token
+          example: "{\"Diagnosis\": \"Diabetes\", \"Blood Group\": \"B+\"}"
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
-          description: successful, a page of subject encounters
+        "200":
+          description: "successful, a page of subject encounters"
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/ResponsePage'
-                properties:
-                  content:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Encounter'
-        '400':
+                $ref: '#/components/schemas/inline_response_200_3'
+        "400":
           description: bad input parameter
   /api/encounter/{ID}:
     get:
@@ -558,26 +852,123 @@ paths:
         Provide the ID of the subject encounter. The ID is in UUID format, the external id used by Avni
         OR provide the ExternalID of the program encounter. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Encounter'
-        '400':
+        "400":
           description: bad input parameter
+    put:
+      tags:
+        - Subject Encounter
+      summary: Updates all attributes of an existing encounter. If no value is specified for an attribute then it would be updated to null/undefined.
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EncounterBody'
+        required: true
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Encounter'
+    patch:
+      tags:
+        - Subject Encounter
+      summary: Updates subject with only the values provided in the request. If no value is specified for an attribute then it would be left unchanged.
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EncounterBody'
+        required: true
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Encounter'
     delete:
       tags:
         - Subject Encounter
@@ -586,76 +977,71 @@ paths:
         Provide the ID of the subject encounter. The ID is in UUID format, the external id used by Avni
         OR provide the ExternalID of the Subject Encounter. Legacy ID set by the external integrating system.
       parameters:
-        - in: path
-          name: ID
+        - name: ID
+          in: path
           required: true
+          style: simple
+          explode: false
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Encounter'
-        '400':
+        "400":
           description: bad input parameter
-        '404':
+        "404":
           description: entity not found
-    put:
-      tags:
-        - Subject Encounter
-      summary: Updates an existing encounter
-      parameters:
-        - in: path
-          name: ID
-          required: true
-          schema:
-            type: string
-            format: uuid
-        - in: header
-          name: auth-token
-          schema:
-            type: string
-            description: token provided by cognito
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/EncounterBody'
-      responses:
-        '200':
-          description: successful
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Encounter'
   /api/encounter:
     post:
       tags:
         - Subject Encounter
       summary: Creates a new encounter
       parameters:
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/EncounterBody'
+        required: true
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
@@ -669,45 +1055,64 @@ paths:
       description: |
         By passing in the appropriate options, you can get the group subjects in set of pages.
       parameters:
-        - in: query
-          name: lastModifiedDateTime
-          description: date-time in ISO datetime format. All the group subject which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. "2000-10-31T01:30:00.000Z".
+        - name: lastModifiedDateTime
+          in: query
+          description: "date-time in ISO datetime format. All the group subject which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\"."
           required: false
+          style: form
+          explode: true
           schema:
             type: string
-        - in: query
-          name: groupSubjectId
+        - name: groupSubjectId
+          in: query
           description: ID of the group subject
           required: false
+          style: form
+          explode: true
           schema:
             type: string
             format: uuid
-        - in: query
-          name: memberSubjectId
+        - name: memberSubjectId
+          in: query
           description: ID of the member subject
           required: false
+          style: form
+          explode: true
           schema:
             type: string
             format: uuid
-        - in: header
-          name: auth-token
+        - name: includeCatchments
+          in: query
+          required: false
+          style: form
+          explode: true
+          description: "Iff true, the catchment details of the subject will be included in the response."
+          schema:
+            type: boolean
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       responses:
-        '200':
-          description: successful, a page of group subject
+        "200":
+          description: "successful, a page of group subject"
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/ResponsePage'
-                properties:
-                  content:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/Encounter'
-        '400':
+                $ref: '#/components/schemas/inline_response_200_3'
+        "400":
           description: bad input parameter
   /api/task:
     post:
@@ -715,26 +1120,353 @@ paths:
         - Task
       summary: Creates a new task
       parameters:
-        - in: header
-          name: auth-token
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
           schema:
             type: string
-            description: token provided by cognito
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
       requestBody:
-        required: true
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/TaskBody'
+        required: true
       responses:
-        '200':
+        "200":
           description: successful
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/Task'
-                  - $ref: '#/components/schemas/TaskBody'
+                $ref: '#/components/schemas/inline_response_200_4'
+  /api/locations:
+    get:
+      tags:
+        - Location
+      summary: Get paged list of locations
+      description: |
+        By passing in the appropriate options, you can get the locations in set of pages.
+      parameters:
+        - name: lastModifiedDateTime
+          in: query
+          description: "date-time in ISO datetime format. All the locations which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\"."
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: string
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      responses:
+        "200":
+          description: "successful, a page of locations"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/inline_response_200_locations'
+        "400":
+          description: bad input parameter
+  /api/location/{ID}:
+    get:
+      tags:
+        - Location
+      summary: Get a specific location by ID
+      description: |
+        Provide the ID of the location. The ID is in UUID format.
+      parameters:
+        - name: ID
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Location'
+        "400":
+          description: bad input parameter
+  /api/user/enable:
+    post:
+      tags:
+        - User
+      summary: Enable a user
+      parameters:
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnableUserBody'
+        required: true
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnableUserResponse'
+  /api/subjectMigration/bulk:
+    post:
+      tags:
+        - Subject, Subject Migration, Program Encounter, Program Enrolment, Encounter, Group Subject
+      summary: Migrate specified subjects and its descendant data (like encounter etc) from one location to another or from one sync concept(s) to another. Processing happens as a batch job.
+      parameters:
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+        - name: mode
+          in: query
+          description: |
+            Mode for the migration. Mandatory. Supported values:
+              * `byAddress` - migrate subjects from their current address to a destination address. Requires `destinationAddresses` in the request body.
+              * `bySyncConcept` - update one or more sync concept values on the subjects. Requires `destinationSyncConcepts` in the request body.
+          required: true
+          explode: false
+          schema:
+            type: string
+            enum: ["byAddress", "bySyncConcept"]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkSubjectMigrationBody'
+            example: >
+              {
+                  "destinationAddresses": {
+                      "330785": "330856",
+                      "334657": "335043",
+                      "331106": "331466"
+                  },
+                  "destinationSyncConcepts": {
+                      "e5c37dc0-7660-49c2-abf1-87a7d2b3c5ef": "Maharashtra",
+                      "5ecbc89b-3d06-4911-95c3-8227e9f78790": "Karnataka"
+                  },
+                  "subjectIds": [
+                      1234,
+                      1235
+                  ]
+              }
+        required: true
+      responses:
+        "202":
+          description: accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusBody'
+        "400":
+          description: bad request
+  /api/subjectMigration/bulk/status/{jobId}:
+    get:
+      tags:
+        - Subject, Subject Migration
+      summary: Get status of a bulk subject migration job
+      description: |
+        Provide the ID of the job for which status needs to be checked. The ID is in UUID format.
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: string
+            format: uuid
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      responses:
+        "200":
+          description: successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusBody'
+        "404":
+          description: Job not found
+  /api/subjectTree:
+    delete:
+      tags:
+        - Subject, Subject Migration, Program Encounter, Program Enrolment, Encounter, Group Subject
+      summary: Void Subjects and its descendants that match the criteria provided. It currently supports taking id of locations. All subject and descendants belonging to that location will get voided. This API should not be used to update more than 10,000 records of each entity type.
+      parameters:
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoidSubjectCriteriaBody'
+            example: >
+              {
+                "addressIds": [20, 30]
+              }
+        required: true
+      responses:
+        "200":
+          description: successful
+  /api/approvalStatuses:
+    get:
+      tags:
+        - Entity Approval Status
+      summary: Get paged list of entity approval statues
+      description: |
+        By passing in the appropriate options, you can get the entity approval statuses in set of pages
+      operationId: entityApprovalStatuses
+      parameters:
+        - name: lastModifiedDateTime
+          in: query
+          description: "date-time in ISO datetime format. All the entity approval statuses which have been updated since this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\". Defaults to \"1900-01-01T00:00:00.000Z\"."
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: string
+        - name: now
+          in: query
+          description: "date-time in ISO datetime format. All the entity approval statuses which have been updated till this time will be returned. The value should be specified in the following format - yyyy-MM-dd'T'HH:mm:ss.SSSZ, e.g. \"2000-10-31T01:30:00.000Z\". Defaults to current time."
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: string
+        - name: entityType
+          in: query
+          description: "Allows filtering results by entity type name"
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: string
+            nullable: true
+            enum: [ Subject,ProgramEnrolment,ProgramEncounter,Encounter,ChecklistItem ]
+        - name: entityTypeId
+          in: query
+          description: "Allows filtering results by entity type id"
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: string
+          example: 1e9afb68-7e64-4295-8865-dbe7c433823e
+        - name: auth-token
+          in: header
+          required: false
+          style: simple
+          explode: false
+          schema:
+            type: string
+            description: token provided by cognito/keycloak
+        - name: version
+          in: query
+          description: "Version of the API to be called"
+          required: false
+          explode: false
+          schema:
+            type: string
+            default: 1
+      responses:
+        "200":
+          description: "successful, a page of entity approval statuses"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/inline_response_200_eas'
+        "400":
+          description: bad input parameter
 components:
   schemas:
     Subject:
@@ -745,7 +1477,7 @@ components:
           format: uuid
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system, this field is optional.
+          description: "External ID, present when subject is created by an external integrating system. This field is optional."
         Voided:
           type: boolean
         Subject type:
@@ -756,23 +1488,30 @@ components:
         Registration date:
           type: string
           format: date
-          example: '2016-08-29'
+          example: 2016-08-29
         location:
           type: object
-          description: 'full hierarchy of location is provided, each one as key-value pair. Example {"Village": "Ganks", "Block": "Ynaos"}'
           additionalProperties:
             type: string
+          description: "full hierarchy of location is provided, each one as key-value pair"
+          example: "{\"Village\": \"Ganks\", \"Block\": \"Ynaos\"}"
+        Location ID:
+          type: string
+          format: uuid
+          description: Unique identifier of the lowest location/address at which the subject is registered
         relatives:
           type: array
           items:
             $ref: '#/components/schemas/SubjectRelationship'
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts). Note that first name, last name and middle name (if allowed on subject type comes here)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts). Note that first name, last name and middle name (if allowed on subject type comes here)"
           example:
             Phone number: 9801010101
-            Medical problems: ["Asthama", "Diabetes"]
-            Marriage date: '1994-08-29'
+            Medical problems:
+              - Asthama
+              - Diabetes
+            Marriage date: 1994-08-29
         encounters:
           type: array
           items:
@@ -790,26 +1529,32 @@ components:
       properties:
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system, this field is optional.
+          description: "External ID, present when subject is created by an external integrating system. This field is optional."
         Subject type:
           type: string
           example: Individual
         Address:
           type: string
-          example: India, Uttarakhand, Dehradun
           description: Complete address of the subject
+          example: "India, Uttarakhand, Dehradun"
+        Address map:
+          $ref: '#/components/schemas/AddressMap'
+        Location ID:
+          type: string
+          format: uuid
+          description: Unique identifier of the lowest location/address at which the subject is registered
         Date of birth:
           type: string
-          format: date
           description: Applicable only for Person type subject
+          format: date
         Gender:
           type: string
-          example: Male
           description: Applicable only for Person type subject
+          example: Male
         Registration date:
           type: string
-          format: date
           description: Registration date
+          format: date
         First name:
           type: string
         Middle name:
@@ -821,7 +1566,7 @@ components:
           $ref: '#/components/schemas/GeoLocation'
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Profile picture:
           type: string
         Voided:
@@ -840,15 +1585,15 @@ components:
           example: d290f1ee-6c54-4b01-90e6-d701748f0851
         Relative external ID:
           type: string
-          description: Relative's Legacy ID set by the external integrating system, this field is optional.
+          description: "Relative's Legacy ID set by the external integrating system, this field is optional."
         Enter date:
           type: string
           format: date-time
-          example: '2017-07-21T17:32:28Z'
+          example: 2017-07-21T17:32:28Z
         Exit date:
           type: string
           format: date-time
-          example: '2017-11-14T17:34:28Z'
+          example: 2017-11-14T17:34:28Z
     ProgramEnrolment:
       type: object
       properties:
@@ -857,7 +1602,7 @@ components:
           format: uuid
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system, this field is optional.
+          description: "External ID, present when enrolment is created by an external integrating system. This field is optional."
         Voided:
           type: boolean
         Subject ID:
@@ -865,7 +1610,7 @@ components:
           format: uuid
         Subject external ID:
           type: string
-          description: Subject's Legacy ID set by the external integrating system, this field is optional.
+          description: "Subject's external ID, present when its subject is created by an external integrating system. This field is optional."
         Subject type:
           type: string
         Program:
@@ -883,10 +1628,10 @@ components:
           $ref: '#/components/schemas/GeoLocation'
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         exitObservations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         encounters:
           type: array
           items:
@@ -902,57 +1647,57 @@ components:
           format: uuid
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system, this field is optional.
+          description: "External ID, present when program encounter is created by an external integrating system. This field is optional."
         Voided:
           type: boolean
         Subject ID:
           type: string
-          format: uuid
           description: id of the subject
+          format: uuid
         Subject external ID:
           type: string
-          description: Subject's Legacy ID set by the external integrating system, this field is optional.
+          description: "Subject's external ID, present when subject is created by an external integrating system. This field is optional."
         Subject type:
           type: string
-          description: name of the subject type to which this encounter belongs, same as subject type in the subject resource
+          description: "name of the subject type to which this encounter belongs, same as subject type in the subject resource"
         Enrolment ID:
           type: string
-          format: uuid
           description: id of the program enrolment
+          format: uuid
         Enrolment external ID:
           type: string
-          description: Enrolment's Legacy ID set by the external integrating system, this field is optional.
+          description: "Enrolment's external ID, present when enrolment is created by an external integrating system. This field is optional."
         Program:
           type: string
-          description: name of the program of the enrolment to which this encounter belongs, same as program in the program enrolment resource
+          description: "name of the program of the enrolment to which this encounter belongs, same as program in the program enrolment resource"
         Encounter type:
           type: string
           example: Monthly Visit
         Encounter location:
           $ref: '#/components/schemas/GeoLocation'
-        Encounter datetime:
+        Encounter date time:
           type: string
           format: date-time
         Earliest scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         Max scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Cancel location:
           $ref: '#/components/schemas/GeoLocation'
         Cancel datetime:
           type: string
-          format: date-time
           description: available only for cancelled encounters
+          format: date-time
         cancelObservations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         audit:
           $ref: '#/components/schemas/Audit'
     ProgramEncounterBody:
@@ -960,45 +1705,45 @@ components:
       properties:
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system, this field is optional.
+          description: "External ID, present when program encounter is created by an external integrating system. This field is optional."
         Enrolment ID:
           type: string
-          format: uuid
           description: id of the program enrolment
+          format: uuid
         Enrolment external ID:
           type: string
-          description: Enrolment's Legacy ID set by the external integrating system, this field is optional.
+          description: "Enrolment's external ID, present when enrolment is created by an external integrating system. This field is optional."
         Program:
           type: string
-          description: name of the program of the enrolment to which this encounter belongs, same as program in the program enrolment resource
+          description: "name of the program of the enrolment to which this encounter belongs, same as program in the program enrolment resource"
         Encounter type:
           type: string
           example: Monthly Visit
         Encounter location:
           $ref: '#/components/schemas/GeoLocation'
-        Encounter datetime:
+        Encounter date time:
           type: string
           format: date-time
         Earliest scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         Max scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Cancel location:
           $ref: '#/components/schemas/GeoLocation'
         Cancel datetime:
           type: string
-          format: date-time
           description: available only for cancelled encounters
+          format: date-time
         cancelObservations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Voided:
           type: boolean
     Encounter:
@@ -1009,7 +1754,7 @@ components:
           format: uuid
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system, this field is optional.
+          description: "External ID, present when encounter is created by an external integrating system. This field is optional."
         Voided:
           type: boolean
         Encounter type:
@@ -1017,39 +1762,39 @@ components:
           example: Monthly Visit
         Subject ID:
           type: string
-          format: uuid
           description: id of the subject
+          format: uuid
         Subject external ID:
           type: string
-          description: Subject's Legacy ID set by the external integrating system, this field is optional.
+          description: "Subject's external ID, present when subject is created by an external integrating system. This field is optional."
         Subject type:
           type: string
-          description: name of the subject type to which this encounter belongs, same as subject type in the subject resource
+          description: "name of the subject type to which this encounter belongs, same as subject type in the subject resource"
         Encounter location:
           $ref: '#/components/schemas/GeoLocation'
-        Encounter datetime:
+        Encounter date time:
           type: string
           format: date-time
         Earliest scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         Max scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Cancel location:
           $ref: '#/components/schemas/GeoLocation'
         Cancel datetime:
           type: string
-          format: date-time
           description: available only for cancelled encounters
+          format: date-time
         cancelObservations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         audit:
           $ref: '#/components/schemas/Audit'
     ProgramEnrolmentBody:
@@ -1057,17 +1802,17 @@ components:
       properties:
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system, this field is optional.
+          description: "External ID, present when enrolment is created by an external integrating system. This field is optional."
         Program:
           type: string
           example: ANC program
         Subject ID:
           type: string
-          format: uuid
           description: id of the subject
+          format: uuid
         Subject external ID:
           type: string
-          description: Subject's Legacy ID set by the external integrating system, this field is optional.
+          description: "Subject's external ID, present when enrolment is created by an external integrating system. This field is optional."
         Enrolment location:
           $ref: '#/components/schemas/GeoLocation'
         Exit location:
@@ -1080,10 +1825,10 @@ components:
           format: date-time
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         exitObservations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Voided:
           type: boolean
     EncounterBody:
@@ -1091,88 +1836,136 @@ components:
       properties:
         External ID:
           type: string
-          description: Legacy ID set by the external integrating system
+          description: "External ID, present when encounter is created by an external integrating system. This field is optional."
         Encounter type:
           type: string
           example: Monthly Visit
         Subject ID:
           type: string
-          format: uuid
           description: id of the subject
+          format: uuid
         Subject external ID:
           type: string
-          description: Subject's Legacy ID set by the external integrating system
+          description: "Subject's external ID, present when subject is created by an external integrating system. This field is optional."
         Encounter location:
           $ref: '#/components/schemas/GeoLocation'
-        Encounter datetime:
+        Encounter date time:
           type: string
           format: date-time
         Earliest scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         Max scheduled date:
           type: string
-          format: date
           description: available only for scheduled encounters
+          format: date
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Cancel location:
           $ref: '#/components/schemas/GeoLocation'
         Cancel datetime:
           type: string
-          format: date-time
           description: available only for cancelled encounters
+          format: date-time
         cancelObservations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts)"
         Voided:
           type: boolean
+    EnableUserBody:
+        type: object
+        properties:
+            Username:
+              type: string
+              description: "Username of the user to be enabled. This is userId used during login"
+            Success:
+              type: boolean
+              description: "true if the user is enabled successfully"
+            Error message:
+              type: string
+              description: "Error message if the user is not enabled successfully"
+    EnableUserResponse:
+        type: object
+        properties:
+            Username:
+              type: string
+
+    Location:
+      type: object
+      properties:
+        ID:
+          type: string
+          format: uuid
+        External ID:
+          type: string
+          description: "External ID, present when location is created by an external integrating system. This field is optional."
+        Title:
+          type: string
+        Type:
+          type: string
+        Level:
+          type: number
+          description: "Level of the location in the hierarchy"
+        GPS Coordinates:
+          $ref: '#/components/schemas/GeoLocation'
+        Parent:
+          $ref: '#/components/schemas/Location'
+        Voided:
+          type: boolean
+        audit:
+          $ref: '#/components/schemas/Audit'
+    AddressMap:
+      type: object
+      additionalProperties:
+        type: string
+      description: 'Map with location type name to location name key value pairs representing an address. Required when passing version as 3 and up.'
+      example: '{"Country": "India", "State: "Uttarakhand", "City": "Dehradun"}'
     GeoLocation:
       type: object
-      description: Available if the location is enabled by the user
       properties:
         X:
           type: number
           example: 19.1253108
-        Y:
+        "Y":
           type: number
           example: 74.7364501
+      description: Available if the location is enabled by the user for transactional data
     Audit:
       type: object
       properties:
         Created at:
           type: string
           format: date-time
-          example: '2016-07-21T17:32:28Z'
+          example: 2016-07-21T17:32:28Z
         Last modified at:
           type: string
           format: date-time
-          example: '2018-07-21T17:32:28Z'
+          example: 2018-07-21T17:32:28Z
         Created by:
           type: string
           description: Username which the user uses for login
-          example: 'narayan@jnpct'
+          example: narayan@jnpct
         Last modified by:
           type: string
           description: Username which the user uses for login
-          example: 'sheela@jnpct'
+          example: sheela@jnpct
     ResponsePage:
       type: object
       properties:
         totalElements:
           type: integer
-          example: 1226
           description: Number of entities (like subject) in all the pages put together
+          example: 1226
         totalPages:
           type: integer
-          example: 13
           description: Total number of pages
+          example: 13
         pageSize:
           type: integer
-          example: 100
           description: Number of entities in each page
+          example: 100
     Task:
       type: object
       properties:
@@ -1198,24 +1991,24 @@ components:
           type: string
         Scheduled on:
           type: string
-          format: date-time
           description: Optional field
+          format: date-time
         Completed on:
           type: string
-          format: date-time
           description: Optional field
+          format: date-time
         Assigned to:
           type: string
           description: The login username of the user to which the task should be assigned
         metadata:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts"
           example:
             Contact number: "9801010101"
-            Preferred time of day: 'Day'
+            Preferred time of day: Day
         observations:
           type: object
-          description: as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts
+          description: "as key value pairs. key is string and value of type (date, string, number or array of string of name of concepts"
           example:
             Duration of talk: 25
         Subject ID:
@@ -1224,12 +2017,132 @@ components:
         Subject External ID:
           type: string
           description: The ID of the calling system for the subject for which this task is to be done
-servers:
-  # Added by API Auto Mocking Plugin
-  - description: SwaggerHub API Auto Mocking
-    url: https://virtserver.swaggerhub.com/samanvay/avni-external/1.0.0
-  # staging and production server
-  - description: Avni production server
-    url: https://app.avniproject.org/
-  - description: Avni staging server
-    url: https://staging.avniproject.org/
+    BulkSubjectMigrationBody:
+      type: object
+      properties:
+        destinationAddresses:
+          type: object
+          description: "Required if mode is byAddress. As key value pairs. key is string and value is of type string. key is source address id and value is destination address id"
+        destinationSyncConcepts:
+          type: object
+          description: "Required if mode is bySyncConcept. As key value pairs. key is string and value is of type string. key is sync concept uuid and value is destination value"
+        subjectIds:
+          type: array
+          description: "Required. array of long values. each item in array is the id of a subject to be migrated."
+          items:
+            type: integer
+    JobStatusBody:
+      type: object
+      properties:
+        uuid:
+          type: string
+          description: "uuid of the job"
+        status:
+          type: string
+          description: "job status"
+        exitStatus:
+          type: string
+          description: "job exit status"
+        createTime:
+          type: string
+          description: "job create time"
+        startTime:
+          type: string
+          description: "job start time"
+        endTime:
+          type: string
+          description: "job end time"
+        fileName:
+          type: string
+          description: "Filename containing result of the migration process available on S3"
+    VoidSubjectCriteriaBody:
+      type: object
+      properties:
+        addressIds:
+          type: array
+          description: "id of locations"
+          items:
+            type: number
+    EntityApprovalStatusBody:
+      type: object
+      properties:
+        Entity ID:
+          type: string
+          description: ID of the entity for which the approval action was done.
+        Entity type:
+          type: string
+          description: Type of the entity which the approval action was done.
+        Entity type ID:
+          type: string
+          description: ID of the entity type of the entity for which the approval action was done. This will be the ID of the subject type, program, or encounter type - for the entity for which approval action was taken.
+        Approval status:
+          type: string
+          description: Approval status for the entity
+        Approval status comment:
+          type: string
+          description: Comments on the approval status for the entity
+        observations:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: "Answers captured on the approval or rejection form, as key value pairs, in the same shape as observations on a subject or an encounter. Null when the decision carries no answers - either no approval form is attached to the entity type, or the decision was taken before one was attached."
+          example:
+            Rejection reason: Wrong address
+            Rejection note: Door number did not match
+        Status date time:
+          type: string
+          description: Date/Time when the approval status was set
+        audit:
+          $ref: '#/components/schemas/Audit'
+    inline_response_200:
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/Subject'
+      allOf:
+        - $ref: '#/components/schemas/ResponsePage'
+    inline_response_200_1:
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProgramEnrolment'
+      allOf:
+        - $ref: '#/components/schemas/ResponsePage'
+    inline_response_200_2:
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProgramEncounter'
+      allOf:
+        - $ref: '#/components/schemas/ResponsePage'
+    inline_response_200_3:
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/Encounter'
+      allOf:
+        - $ref: '#/components/schemas/ResponsePage'
+    inline_response_200_4:
+      allOf:
+        - $ref: '#/components/schemas/Task'
+        - $ref: '#/components/schemas/TaskBody'
+    inline_response_200_locations:
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/Location'
+      allOf:
+        - $ref: '#/components/schemas/ResponsePage'
+    inline_response_200_eas:
+      properties:
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/EntityApprovalStatusBody'
+      allOf:
+        - $ref: '#/components/schemas/ResponsePage'

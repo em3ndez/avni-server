@@ -1,50 +1,59 @@
 package org.avni.server.web;
 
+import org.avni.server.application.OrganisationConfigSettingKey;
 import org.avni.server.dao.*;
 import org.avni.server.domain.*;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.OrganisationService;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.web.request.OrganisationContract;
+import org.avni.server.web.request.SnapshotEnabledOrg;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.repository.query.Param;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.persistence.criteria.Predicate;
-import javax.transaction.Transactional;
+import jakarta.persistence.criteria.Predicate;
+import org.springframework.transaction.annotation.Transactional;
 import java.util.*;
 import java.util.stream.Collectors;
 
 @RestController
 public class OrganisationController implements RestControllerResourceProcessor<Organisation> {
-
     private final OrganisationRepository organisationRepository;
     private final AccountRepository accountRepository;
-    private final GenderRepository genderRepository;
-    private final OrganisationConfigRepository organisationConfigRepository;
-    private final GroupRepository groupRepository;
     private final ImplementationRepository implementationRepository;
+    private final AccessControlService accessControlService;
+    private final OrganisationService organisationService;
+    private final OrganisationCategoryRepository organisationCategoryRepository;
+    private final OrganisationStatusRepository organisationStatusRepository;
+    private final OrganisationConfigRepository organisationConfigRepository;
+
+    @Value("${avni.default.org.user.db.password}")
+    private String AVNI_DEFAULT_ORG_USER_DB_PASSWORD;
 
     @Autowired
-    public OrganisationController(OrganisationRepository organisationRepository, AccountRepository accountRepository, GenderRepository genderRepository, OrganisationConfigRepository organisationConfigRepository, GroupRepository groupRepository, ImplementationRepository implementationRepository) {
+    public OrganisationController(OrganisationRepository organisationRepository, AccountRepository accountRepository, ImplementationRepository implementationRepository, AccessControlService accessControlService, OrganisationService organisationService, OrganisationCategoryRepository organisationCategoryRepository, OrganisationStatusRepository organisationStatusRepository, OrganisationConfigRepository organisationConfigRepository) {
         this.organisationRepository = organisationRepository;
         this.accountRepository = accountRepository;
-        this.genderRepository = genderRepository;
-        this.organisationConfigRepository = organisationConfigRepository;
-        this.groupRepository = groupRepository;
         this.implementationRepository = implementationRepository;
+        this.accessControlService = accessControlService;
+        this.organisationService = organisationService;
+        this.organisationCategoryRepository = organisationCategoryRepository;
+        this.organisationStatusRepository = organisationStatusRepository;
+        this.organisationConfigRepository = organisationConfigRepository;
     }
 
     @RequestMapping(value = "/organisation", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
-    public ResponseEntity save(@RequestBody OrganisationContract request) {
-        String tempPassword = "password";
+    public ResponseEntity save(@RequestBody OrganisationContract request, @RequestParam(value = "sample", defaultValue = "false") boolean sample) {
+        accessControlService.assertIsSuperAdmin();
         Organisation org = organisationRepository.findByUuid(request.getUuid());
-        implementationRepository.createDBUser(request.getDbUser(), tempPassword);
+        implementationRepository.createDBUser(request.getDbUser(), AVNI_DEFAULT_ORG_USER_DB_PASSWORD);
         implementationRepository.createImplementationSchema(request.getSchemaName(), request.getDbUser());
         if (org == null) {
             org = new Organisation();
@@ -52,72 +61,53 @@ public class OrganisationController implements RestControllerResourceProcessor<O
         org.setUuid(request.getUuid() == null ? UUID.randomUUID().toString() : request.getUuid());
         org.setDbUser(request.getDbUser());
         org.setSchemaName(request.getSchemaName());
+        org.setCategory(organisationCategoryRepository.findEntity(request.getCategoryId()));
+        org.setStatus(organisationStatusRepository.findEntity(request.getStatusId()));
         setAttributesOnOrganisation(request, org);
         setOrgAccountByIdOrDefault(org, request.getAccountId());
 
         organisationRepository.save(org);
-        createDefaultGenders(org);
-        addDefaultGroup(org.getId());
-        createDefaultOrgConfig(org);
-
+        organisationService.setupBaseOrganisationData(org);
+        if (sample) {
+            UserContextHolder.getUserContext().setOrganisation(org);
+            try {
+                organisationService.setupSampleOrganisationData(org);
+            } finally {
+                UserContextHolder.getUserContext().setOrganisation(null);
+            }
+        }
         return new ResponseEntity<>(org, HttpStatus.CREATED);
     }
 
-    private void createDefaultOrgConfig(Organisation org) {
-        OrganisationConfig organisationConfig = new OrganisationConfig();
-        organisationConfig.assignUUID();
-        Map<String, Object> settings = new HashMap<>();
-        settings.put("languages", new String[]{"en"});
-        JsonObject jsonObject = new JsonObject(settings);
-        organisationConfig.setSettings(jsonObject);
-        organisationConfig.setOrganisationId(org.getId());
-        organisationConfigRepository.save(organisationConfig);
-    }
-
-    private void createDefaultGenders(Organisation org) {
-        createGender("Male", org);
-        createGender("Female", org);
-        createGender("Other", org);
-    }
-
-    private void createGender(String genderName, Organisation org) {
-        Gender gender = new Gender();
-        gender.setName(genderName);
-        gender.assignUUID();
-        gender.setOrganisationId(org.getId());
-        genderRepository.save(gender);
-    }
-
-    private void addDefaultGroup(Long organisationId){
-        Group group = new Group();
-        group.setName("Everyone");
-        group.setOrganisationId(organisationId);
-        group.setUuid(UUID.randomUUID().toString());
-        group.setHasAllPrivileges(true);
-        group.setVersion(0);
-        groupRepository.save(group);
-    }
-
     @RequestMapping(value = "/organisation", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     public List<OrganisationContract> findAll() {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         List<Organisation> organisations = organisationRepository.findByAccount_AccountAdmin_User_Id(user.getId());
         return organisations.stream().map(OrganisationContract::fromEntity).collect(Collectors.toList());
     }
 
     @RequestMapping(value = "/organisation/{id}", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     public OrganisationContract findById(@PathVariable Long id) {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         Organisation organisation = organisationRepository.findByIdAndAccount_AccountAdmin_User_Id(id, user.getId());
         return organisation != null ? OrganisationContract.fromEntity(organisation) : null;
     }
 
+    @RequestMapping(value = "/organisation/current", method = RequestMethod.GET)
+    @Transactional(readOnly = true)
+    public OrganisationContract findCurrent() {
+        long organisationId = UserContextHolder.getUserContext().getOrganisationId();
+        return OrganisationContract.fromEntity(organisationRepository.findOne(organisationId));
+    }
+
     @RequestMapping(value = "/organisation/{id}", method = RequestMethod.PUT)
-    @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(rollbackFor = Exception.class)
     public Organisation updateOrganisation(@PathVariable Long id, @RequestBody OrganisationContract request) throws Exception {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         Organisation organisation = organisationRepository.findByIdAndAccount_AccountAdmin_User_Id(id, user.getId());
         if (organisation == null) {
@@ -129,13 +119,13 @@ public class OrganisationController implements RestControllerResourceProcessor<O
         return organisationRepository.save(organisation);
     }
 
-
     @RequestMapping(value = "/organisation/search/find", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public Page<OrganisationContract> find(@RequestParam(value = "name", required = false) String name,
                                            @RequestParam(value = "dbUser", required = false) String dbUser,
                                            Pageable pageable) {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         List<Account> ownedAccounts = accountRepository.findAllByAccountAdmin_User_Id(user.getId());
         Page<Organisation> organisations = organisationRepository.findAll((root, query, builder) -> {
@@ -148,16 +138,41 @@ public class OrganisationController implements RestControllerResourceProcessor<O
             }
             List<Predicate> predicates = new ArrayList<>();
             ownedAccounts.forEach(account -> predicates.add(builder.equal(root.get("account"), account)));
-            Predicate accountPredicate = builder.or(predicates.toArray(new Predicate[predicates.size()]));
+            Predicate accountPredicate = builder.or(predicates.toArray(new Predicate[0]));
             return builder.and(accountPredicate, predicate);
         }, pageable);
         return organisations.map(OrganisationContract::fromEntity);
     }
 
     @RequestMapping(value = "organisation/search/findAllById", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     public Page<Organisation> findAllById(@Param("ids") Long[] ids, Pageable pageable) {
+        accessControlService.assertIsSuperAdmin();
         return organisationRepository.findAllByIdInAndIsVoidedFalse(ids, pageable);
+    }
+
+    @RequestMapping(value = "/organisation/sqliteSnapshotEnabled", method = RequestMethod.GET)
+    @Transactional(readOnly = true)
+    public List<SnapshotEnabledOrg> findSqliteSnapshotEnabled() {
+        accessControlService.assertIsSuperAdmin();
+        List<SnapshotEnabledOrg> result = new ArrayList<>();
+        for (OrganisationConfig cfg : organisationConfigRepository.findAll()) {
+            JsonObject settings = cfg.getSettings();
+            if (settings == null) continue;
+            if (!Boolean.TRUE.equals(settings.get(OrganisationConfigSettingKey.enableSqliteSnapshotGeneration.name()))) continue;
+            Organisation org = organisationRepository.findOne(cfg.getOrganisationId());
+            if (org == null || org.isVoided()) continue;
+            Object enabledAt = settings.get(OrganisationConfigSettingKey.enabledSqliteSnapshotGenerationAt.name());
+            result.add(new SnapshotEnabledOrg(
+                org.getId(),
+                org.getName(),
+                org.getDbUser(),
+                org.getMediaDirectory(),
+                enabledAt.toString()
+            ));
+        }
+        result.sort(Comparator.comparing(SnapshotEnabledOrg::getEnabledAt));
+        return result;
     }
 
     private void setAttributesOnOrganisation(@RequestBody OrganisationContract request, Organisation organisation) {
@@ -169,6 +184,8 @@ public class OrganisationController implements RestControllerResourceProcessor<O
         }
         organisation.setMediaDirectory(request.getMediaDirectory());
         organisation.setVoided(request.isVoided());
+        organisation.setCategory(organisationCategoryRepository.findEntity(request.getCategoryId()));
+        organisation.setStatus(organisationStatusRepository.findEntity(request.getStatusId()));
     }
 
     private void setOrgAccountByIdOrDefault(Organisation organisation, Long accountId) {
@@ -177,5 +194,4 @@ public class OrganisationController implements RestControllerResourceProcessor<O
                 : accountRepository.findOne(accountId);
         organisation.setAccount(account);
     }
-
 }

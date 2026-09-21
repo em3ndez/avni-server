@@ -3,14 +3,16 @@ DELETE FROM form_element;
 DELETE FROM form_element_group;
 DELETE FROM form_mapping;
 DELETE FROM form;
+DELETE FROM user_subject;
 DELETE FROM encounter;
 DELETE FROM program_encounter;
 DELETE FROM program_enrolment;
 DELETE FROM subject_migration;
 DELETE FROM individual;
+DELETE FROM operational_program;
 DELETE FROM program;
+DELETE FROM operational_encounter_type;
 DELETE FROM encounter_type;
-DELETE FROM program_outcome;
 DELETE FROM concept_answer;
 DELETE FROM answer_concept_migration;
 DELETE FROM concept;
@@ -20,20 +22,24 @@ DELETE FROM individual_relation_gender_mapping;
 DELETE FROM individual_relation;
 DELETE FROM gender;
 DELETE FROM catchment_address_mapping;
+DELETE FROM location_location_mapping;
 DELETE FROM address_level;
 DELETE FROM catchment;
-DELETE FROM account_admin;
+DELETE FROM account_admin where admin_id <> (select id from users where username = 'admin');
 DELETE FROM user_group;
 DELETE FROM external_system_config;
 DELETE FROM organisation_config;
 DELETE from message_request_queue;
+DELETE from flow_request_queue;
 DELETE from message_receiver;
 DELETE from message_rule;
-DELETE FROM users;
+DELETE FROM reset_sync;
+DELETE FROM users where username <> 'admin';
 DELETE FROM subject_type;
 DELETE FROM group_privilege;
+DELETE FROM group_dashboard;
 DELETE FROM groups;
-DELETE FROM organisation;
+DELETE FROM organisation where name <> 'OpenCHS';
 DELETE FROM audit;
 
 ALTER SEQUENCE non_applicable_form_element_id_seq RESTART WITH 1;
@@ -47,7 +53,6 @@ ALTER SEQUENCE program_enrolment_id_seq RESTART WITH 1;
 ALTER SEQUENCE individual_id_seq RESTART WITH 1;
 ALTER SEQUENCE program_id_seq RESTART WITH 1;
 ALTER SEQUENCE encounter_type_id_seq RESTART WITH 1;
-ALTER SEQUENCE program_outcome_id_seq RESTART WITH 1;
 ALTER SEQUENCE concept_answer_id_seq RESTART WITH 1;
 ALTER SEQUENCE concept_id_seq RESTART WITH 1;
 ALTER SEQUENCE gender_id_seq RESTART WITH 1;
@@ -66,34 +71,32 @@ ALTER SEQUENCE message_receiver_id_seq RESTART WITH 1;
 ALTER SEQUENCE message_request_queue_id_seq RESTART WITH 1;
 ALTER SEQUENCE message_rule_id_seq RESTART WITH 1;
 
-INSERT into organisation(id, name, db_user, uuid, media_directory, parent_organisation_id, schema_name)
-values (1, 'OpenCHS', 'openchs', '3539a906-dfae-4ec3-8fbb-1b08f35c3884', 'openchs_impl', null, 'openchs')
-ON CONFLICT (uuid) DO NOTHING;
-
 select create_db_user('demo', 'password');
 
-INSERT INTO organisation(id, name, db_user, media_directory, uuid, parent_organisation_id, schema_name)
-VALUES (2, 'demo', 'demo', 'demo', 'ae0e4ac4-681d-45f2-8bdd-2b09a5a1a6e5', 1, 'demo')
+INSERT INTO organisation(id, name, db_user, media_directory, uuid, parent_organisation_id, schema_name, category_id, status_id)
+VALUES (2, 'demo', 'demo', 'demo', 'ae0e4ac4-681d-45f2-8bdd-2b09a5a1a6e5', 1, 'demo', 1, 1)
 ON CONFLICT (uuid) DO NOTHING;
 
 insert into organisation_config (uuid, organisation_id, settings, version, is_voided, worklist_updation_rule, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 values ('5bd9c67e-c949-4872-9763-daeab7b48b1b', 1, '{"enableMessaging": true}', 0, false, '', 1, 1, now(), now());
+insert into organisation_config (uuid, organisation_id, settings, version, is_voided, worklist_updation_rule, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+values ('6bd9c67e-c949-4872-9763-daeab7b48b2c', 2, '{"enableMessaging": true}', 0, false, '', 2, 2, now(), now());
 
 select create_db_user('a_demo', 'password');
 
-INSERT INTO organisation (id, name, db_user, media_directory, uuid, parent_organisation_id, schema_name)
-VALUES (3, 'a-demo', 'a_demo', 'a-demo', '2734f2ba-610b-49f8-b8d3-4196a460e325', 1, 'a_demo')
+INSERT INTO organisation (id, name, db_user, media_directory, uuid, parent_organisation_id, schema_name, category_id, status_id)
+VALUES (3, 'a-demo', 'a_demo', 'a-demo', '2734f2ba-610b-49f8-b8d3-4196a460e325', 1, 'a_demo', 1, 1)
 ON CONFLICT (uuid) DO NOTHING;
 
 insert into subject_type(id, uuid, name, organisation_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES (1, '9f2af1f9-e150-4f8e-aad3-40bb7eb05aa3', 'Individual', 1, 1, 1, now(), now());
 
-INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin)
-VALUES (1, 'admin', '5fed2907-df3a-4867-aef5-c87f4c78a31a', 1, 'None', false);
-INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin)
-VALUES (2, 'demo-admin', '0e53a72c-a109-49f2-918c-9599b266a585', 2, 'None', true);
-INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin)
-VALUES (3, 'a-demo-admin', 'd84df3cf-cdb4-4309-ad91-e0402f6e326a', 3, 'None', true);
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, name)
+VALUES (2, 'demo-admin', '0e53a72c-a109-49f2-918c-9599b266a585', 2, 'None', true, 'demo-admin');
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, name)
+VALUES (3, 'a-demo-admin', 'd84df3cf-cdb4-4309-ad91-e0402f6e326a', 3, 'None', true, 'a-demo-admin');
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, name, catchment_id)
+VALUES (10, 'demouser@demo', 'e0a6d8b2-2e3c-4567-8901-234567890def', 2, 'None', false, 'Demo User', 2);
 
 INSERT INTO catchment (id, name, uuid, version, organisation_id, type, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES
@@ -101,11 +104,11 @@ VALUES
 
 INSERT INTO catchment (id, name, uuid, version, organisation_id, type, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES  (2, 'CatchmentY', 'b95cf900-6740-4696-95a1-219db2a8bdcb', 0, 2, 'TypeY', 1, 1, now(), now());
-INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, catchment_id)
-VALUES (4, 'demo-user', 'f10b5e79-30ef-45ce-a1f5-f1a5101d7c7f', 2, 'ByCatchment', false, 2);
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, catchment_id, name)
+VALUES (4, 'demo-user', 'f10b5e79-30ef-45ce-a1f5-f1a5101d7c7f', 2, 'ByCatchment', false, 2, 'demo-user');
 
-INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, catchment_id)
-VALUES (5, 'demo-user-2', '55ef8e34-d1a3-44c9-b750-a791b09bb369', 2, 'ByCatchment', false, 1);
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, catchment_id, name)
+VALUES (5, 'demo-user-2', '55ef8e34-d1a3-44c9-b750-a791b09bb369', 2, 'ByCatchment', false, 1, 'demo-user-2');
 
 INSERT INTO gender (id, name, uuid, version, organisation_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES (1, 'Female', 'ad7d1d14-54fd-45a2-86b7-ea329b744484', 1, 1, 1, 1, now(), now());
@@ -113,6 +116,22 @@ INSERT INTO gender (id, name, uuid, version, organisation_id, created_by_id, las
 VALUES (2, 'Male', '840de9fb-e565-4d7d-b751-90335ba20490', 1, 1, 1, 1, now(), now());
 INSERT INTO gender (id, name, uuid, version, organisation_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES (3, 'Other', '188ad77e-fe46-4328-b0e2-98f3a05c554c', 1, 1, 1, 1, now(), now());
+
+insert into groups (id, uuid, name, is_voided, version, organisation_id, has_all_privileges, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+values (1, uuid_generate_v4(), 'All Privileges Group', false, 1, 2, true, 1, 1, now(), now());
+insert into user_group (uuid, user_id, group_id, is_voided, version, organisation_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+select uuid_generate_v4(), id, 1, false, 1, 2, 1, 1, now(), now() from users where id != 10;
+
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, catchment_id, name)
+VALUES (6, 'user-no-access', '07a9641b-e848-4efb-96a4-aea35ddb7ef0', 2, 'ByCatchment', false, 1, 'user-no-access');
+insert into groups (id, uuid, name, is_voided, version, organisation_id, has_all_privileges, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+values (2, uuid_generate_v4(), 'No Access', false, 1, 2, false, 1, 1, now(), now());
+insert into groups (id, uuid, name, is_voided, version, organisation_id, has_all_privileges, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+values (3, uuid_generate_v4(), 'Everyone', false, 1, 2, false, 1, 1, now(), now());
+insert into user_group (uuid, user_id, group_id, is_voided, version, organisation_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+values (uuid_generate_v4(), 6, 2, false, 1, 2, 1, 1, now(), now());
+insert into user_group (uuid, user_id, group_id, is_voided, version, organisation_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+values (uuid_generate_v4(), 10, 2, false, 1, 2, 1, 1, now(), now());
 
 INSERT INTO concept (id, name, data_type, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES
@@ -232,14 +251,39 @@ INSERT INTO address_level (id, title, uuid, version, lineage, parent_id, created
 VALUES (1, 'Nijhma', 'ae35fe6d-910e-47bd-a0c7-0c10182a4085', 1, '1', NULL, 1, 1, now(), now());
 INSERT INTO address_level (id, title, uuid, version, lineage, parent_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES (2, 'Naya Gaon', 'a62d5ff9-4480-44f8-ab9f-9fe12e2e1a91', 1, '2', NULL, 1, 1, now(), now());
+INSERT INTO address_level (id, organisation_id, title, uuid, version, lineage, parent_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES (3, 2, 'GP1', '04c419a4-4fbe-4d54-b4d2-8e669f0e47a4', 1, '3', NULL, 1, 1, now(), now());
+INSERT INTO address_level (id, organisation_id, title, uuid, version, lineage, parent_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES (4, 2, 'GP1.Parent1', '53de16f0-d8ba-40d0-9a75-7e1b9e8b1969', 1, '3.4', 3, 1, 1, now(), now());
+INSERT INTO address_level (id, organisation_id, title, uuid, version, lineage, parent_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES (5, 2, 'GP1.Parent1.Child1', 'eb012ab0-680b-4e2d-beda-bc000a50f4cd', 1, '3.4.5', 4, 1, 1, now(), now());
+INSERT INTO address_level (id, organisation_id, title, uuid, version, lineage, parent_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES (6, 2, 'GP2', '8108d1e6-7de8-4c0e-a2ce-8f3ff72d1540', 1, '6', NULL, 1, 1, now(), now());
+INSERT INTO address_level (id, organisation_id, title, uuid, version, lineage, parent_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES (7, 2, 'GP2.Parent2', '87d4037f-2d55-485e-8473-8474db421a74', 1, '6.7', 6, 1, 1, now(), now());
+INSERT INTO address_level (id, organisation_id, title, uuid, version, lineage, parent_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES (8, 2, 'GP2.Parent2.Child2', 'c26bf9e0-7368-490f-ba95-29c82b6a3978', 1, '6.7.8', 7, 1, 1, now(), now());
+
+INSERT INTO catchment (id, name, uuid, version, organisation_id, type, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES
+  (3, 'CatchmentZ', '640867e4-2374-4a26-b0b9-adebad2d86b8', 0, 2, 'TypeZ', 1, 1, now(), now());
+INSERT INTO catchment (id, name, uuid, version, organisation_id, type, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES
+  (4, 'CatchmentZ2', 'b9ea6198-6dd7-4891-ab17-c5697361f733', 0, 2, 'TypeZ', 1, 1, now(), now());
 
 INSERT INTO catchment_address_mapping (catchment_id, addresslevel_id)
-VALUES (1, 1), (1, 2), (2, 2);
+VALUES (1, 1), (1, 2), (2, 2), (3, 4), (4, 6);
+
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, catchment_id, name)
+VALUES (7, 'user-reset-sync-test1@demo', '8fecc62f-4b6b-4dd4-a27d-fa2587e59d04', 2, 'ByCatchment', false, 3, 'user-reset-sync-test1');
+INSERT INTO users (id, username, uuid, organisation_id, operating_individual_scope, is_org_admin, catchment_id, name)
+VALUES (8, 'user-reset-sync-test2@demo', '8924b997-70c9-431c-9f40-be5c9700018f', 2, 'ByCatchment', false, 4, 'user-reset-sync-test2');
 
 INSERT INTO individual (uuid, address_id, version, date_of_birth, date_of_birth_verified, first_name, last_name, gender_id, organisation_id,
-                        subject_type_id, observations, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+                        subject_type_id, observations, subject_location, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
 VALUES ('4378dce3-247e-4393-8dd5-032c6eb0a655', 1, 1, current_timestamp, FALSE, 'Prabhu', 'Kumar', 2, 2,
-        (select id from subject_type where name = 'Individual'), '{"7c39cb04-4f02-4c49-8f94-a5b697d40365": "9282738493"}'::jsonb, 1, 1, now(), now());
+        (select id from subject_type where name = 'Individual'), '{"7c39cb04-4f02-4c49-8f94-a5b697d40365": "9282738493"}'::jsonb,
+        '{"coordinates": {"x": 18.5, "y": 73.8}, "accuracy": 10.5}'::jsonb, 1, 1, now(), now());
 
 INSERT INTO individual (uuid, address_id, version, date_of_birth, date_of_birth_verified, first_name, last_name, gender_id, organisation_id,
                         subject_type_id, observations, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
@@ -247,14 +291,14 @@ VALUES ('5378dce3-247e-4393-8dd5-032c6eb0a655', 1, 1, current_timestamp, FALSE, 
         (select id from subject_type where name = 'Individual'), '{}'::jsonb, 1, 1, now(), now());
 
 
-INSERT INTO program_enrolment (individual_id, program_id, enrolment_date_time, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, address_id)
-VALUES (1, 1, current_timestamp, 'ba0a3b91-2d4d-446b-a3ee-d56e7edaf3d3', 1, 1, 1, now(), now(), 1);
+INSERT INTO program_enrolment (organisation_id, individual_id, program_id, enrolment_date_time, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, address_id)
+VALUES (2, 1, 1, current_timestamp, 'ba0a3b91-2d4d-446b-a3ee-d56e7edaf3d3', 1, 1, 1, now(), now(), 1);
 
-INSERT INTO program_encounter (program_enrolment_id, encounter_type_id, observations, encounter_date_time, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, individual_id, address_id)
-VALUES (1, 1, '{"95c4b174-6ce6-4d9a-b223-1f9000b60006":98.9}' :: JSONB, current_timestamp, 'f5c3d56c-3d69-41bd-9e6a-52963adb6e76', 1, 1, 1, now(), now(), 1, 1);
+INSERT INTO program_encounter (organisation_id, program_enrolment_id, encounter_type_id, observations, encounter_date_time, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, individual_id, address_id)
+VALUES (2, 1, 1, '{"95c4b174-6ce6-4d9a-b223-1f9000b60006":98.9}' :: JSONB, current_timestamp, 'f5c3d56c-3d69-41bd-9e6a-52963adb6e76', 1, 1, 1, now(), now(), 1, 1);
 
-INSERT INTO encounter (individual_id, encounter_type_id, observations, encounter_date_time, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, address_id)
-VALUES (1, 1, '
+INSERT INTO encounter (organisation_id, individual_id, encounter_type_id, observations, encounter_date_time, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, address_id)
+VALUES (2, 1, 1, '
 {
   "conceptUUID": "95c4b174-6ce6-4d9a-b223-1f9000b60006",
   "valuePrimitive": 98.9
@@ -286,8 +330,19 @@ INSERT INTO individual (address_id, date_of_birth, date_of_birth_verified, first
 VALUES (2, '1955-01-05', FALSE, 'Ram', 'Kumari', 1, 'bb312ece-5e2e-490f-ae1d-2896089da81e', 1,
         (select id from subject_type where name = 'Individual'), 1, 1, now(), now());
 
-INSERT INTO form (NAME, form_type, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
-VALUES ('encounter_form', 'Encounter', '2c32a184-6d27-4c51-841d-551ca94594a5', 1, 1, 1, now(), now());
+INSERT INTO individual (uuid, address_id, version, date_of_birth, date_of_birth_verified, first_name, last_name,
+                        gender_id, organisation_id,
+                        subject_type_id, observations, created_by_id, last_modified_by_id, created_date_time,
+                        last_modified_date_time)
+VALUES ('74a37894-0cca-4104-811b-34d84ce8f06e', (select id from address_level where title = 'GP1.Parent1'), 1,
+        current_timestamp, FALSE, 'Subject6', 'Subject6', 2, 2,
+        (select id from subject_type where name = 'Individual'), '{
+    "7c39cb04-4f02-4c49-8f94-a5b697d40365": "9282738493"
+  }'::jsonb, 1, 1, now(), now());
+
+INSERT INTO form (NAME, form_type, uuid, version, created_by_id, last_modified_by_id, created_date_time,
+                  last_modified_date_time)
+VALUES ('encounter_form', 'ProgramEncounter', '2c32a184-6d27-4c51-841d-551ca94594a5', 1, 1, 1, now(), now());
 
 
 INSERT INTO audit (created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
@@ -296,7 +351,8 @@ VALUES (1, 1, now(), now());
 UPDATE form
 SET audit_id = (SELECT currval('audit_id_seq'));
 
-INSERT INTO form_element_group (NAME, form_id, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+INSERT INTO form_element_group (NAME, form_id, uuid, version, created_by_id, last_modified_by_id, created_date_time,
+                                last_modified_date_time)
 VALUES ('default_group', 1, '4b317705-4372-4405-a628-6c8bb8da8671', 1, 1, 1, now(), now());
 
 INSERT INTO audit (id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
@@ -309,29 +365,49 @@ INSERT INTO audit (id, created_by_id, last_modified_by_id, created_date_time, la
 VALUES (1003, 1, 1, now() - INTERVAL '1 year', now() - INTERVAL '1 year');
 
 INSERT INTO form_element (name, display_order, is_mandatory, concept_id, form_element_group_id, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
-VALUES
-('Complaint', 2, TRUE, 2, 1, '2f256e95-3011-4f42-8ebe-1c1af5e6b8d2', 1, 1, 1, now(), now());
+VALUES ('Complaint', 2, TRUE, 2, 1, '2f256e95-3011-4f42-8ebe-1c1af5e6b8d2', 1, 1, 1, now(), now());
 
-INSERT INTO form_element (name, display_order, is_mandatory, concept_id, form_element_group_id, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
-VALUES
-('Temperature', 1, TRUE, 1, 1, '2b2e9964-d942-4f83-a296-1096db2c2f0b', 1, 1, 1, now(), now());
+INSERT INTO form_element (name, display_order, is_mandatory, concept_id, form_element_group_id, uuid, version,
+                          created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES ('Temperature', 1, TRUE, 1, 1, '2b2e9964-d942-4f83-a296-1096db2c2f0b', 1, 1, 1, now(), now());
 
-INSERT INTO form_element (name, display_order, is_mandatory, concept_id, form_element_group_id, uuid, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
-VALUES
-('Paracheck', 3, TRUE, 19, 1, 'b6edbb87-22d8-4265-9231-aad499475d0c', 1, 1, 1, now(), now());
+INSERT INTO form_element (name, display_order, is_mandatory, concept_id, form_element_group_id, uuid, version,
+                          created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
+VALUES ('Paracheck', 3, TRUE, 19, 1, 'b6edbb87-22d8-4265-9231-aad499475d0c', 1, 1, 1, now(), now());
 
-INSERT INTO form_mapping (form_id, entity_id, uuid, version, subject_type_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time)
-VALUES (1, 1, '741cbb1f-f1bf-42f2-87f7-f5258aa91647', 0, 1, 1, 1, now(), now());
+INSERT INTO form_mapping (form_id, entity_id, uuid, version, subject_type_id, created_by_id, last_modified_by_id,
+                          created_date_time, last_modified_date_time, observations_type_entity_id)
+VALUES (1, 1, '741cbb1f-f1bf-42f2-87f7-f5258aa91647', 0, 1, 1, 1, now(), now(), 1);
+
+INSERT INTO form (NAME, form_type, uuid, version, created_by_id, last_modified_by_id, created_date_time,
+                  last_modified_date_time)
+VALUES ('enrolment_form', 'ProgramEnrolment', 'c2d3e4f5-1234-5678-abcd-ef0123456789', 1, 1, 1, now(), now());
+
+INSERT INTO form_mapping (form_id, entity_id, uuid, version, subject_type_id, created_by_id, last_modified_by_id,
+                          created_date_time, last_modified_date_time, observations_type_entity_id)
+VALUES ((select id from form where uuid = 'c2d3e4f5-1234-5678-abcd-ef0123456789'),
+        (select id from program where name = 'Diabetes'),
+        'a1b2c3d4-5678-9abc-def0-123456789abc', 0, 1, 1, 1, now(), now(), null);
 
 INSERT INTO external_system_config (organisation_id, version, created_by_id, last_modified_by_id, created_date_time,
                                     last_modified_date_time, system_name, config)
-values (3, 0, 3, 3, now(), now(), 'Glific', '{"baseUrl": "http://localhost:9191", "phone": "919693847573", "password": "seecretpass"}');
+values (3, 0, 3, 3, now(), now(), 'Glific', '{
+  "baseUrl": "http://localhost:9191",
+  "phone": "919693847573",
+  "password": "seecretpass"
+}');
 
-insert into message_rule (id, uuid, name, message_rule, schedule_rule, entity_type, entity_type_id, message_template_id, version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, organisation_id)
-values (1, '15e766d8-3d8b-4777-8f55-1b171ac9872d', 'Individual message rule', null, '() => ([1, 2, 3])', 'Subject', (select id from subject_type where name = 'Individual'), 1, 0, 1, 2, now(), now(), 1);
+insert into message_rule (id, uuid, name, message_rule, schedule_rule, entity_type, entity_type_id, message_template_id,
+                          version, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time,
+                          organisation_id)
+values (1, '15e766d8-3d8b-4777-8f55-1b171ac9872d', 'Individual message rule', null, '() => ([1, 2, 3])', 'Subject',
+        (select id from subject_type where name = 'Individual'), 1, 0, 1, 2, now(), now(), 1);
 
-insert into message_receiver(id, uuid, receiver_type, receiver_id, organisation_id, is_voided, external_id, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, version)
-values (1, 'c48d7ae7-d0a9-4f79-aede-19297db736f9', 'Subject', (select id from individual where uuid = '4378dce3-247e-4393-8dd5-032c6eb0a655'), 1, false, '1', 1, 1, now(), now(), 1);
+insert into message_receiver(id, uuid, receiver_type, receiver_id, organisation_id, is_voided, external_id,
+                             created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, version)
+values (1, 'c48d7ae7-d0a9-4f79-aede-19297db736f9', 'Subject',
+        (select id from individual where uuid = '4378dce3-247e-4393-8dd5-032c6eb0a655'), 1, false, '1', 1, 1, now(),
+        now(), 1);
 
 insert into message_request_queue(uuid, organisation_id, message_rule_id, message_receiver_id, scheduled_date_time, delivered_date_time, delivery_status, created_by_id, last_modified_by_id, created_date_time, last_modified_date_time, version, entity_id)
 values ('75925823-109f-41a5-89e3-9c719c88155d', 1, 1, 1, now(), null, 'NotSent', 1, 1, now(), now(), 0, (select id from individual where uuid = '4378dce3-247e-4393-8dd5-032c6eb0a655'));
@@ -365,8 +441,6 @@ SELECT setval('program_id_seq', COALESCE((SELECT MAX(id) + 1
                                           FROM program), 1), FALSE);
 SELECT setval('encounter_type_id_seq', COALESCE((SELECT MAX(id) + 1
                                                  FROM encounter_type), 1), FALSE);
-SELECT setval('program_outcome_id_seq', COALESCE((SELECT MAX(id) + 1
-                                                  FROM program_outcome), 1), FALSE);
 SELECT setval('concept_answer_id_seq', COALESCE((SELECT MAX(id) + 1
                                                  FROM concept_answer), 1), FALSE);
 SELECT setval('concept_id_seq', COALESCE((SELECT MAX(id) + 1

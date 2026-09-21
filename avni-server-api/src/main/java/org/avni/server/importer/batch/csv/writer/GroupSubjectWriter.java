@@ -17,6 +17,7 @@ import org.avni.server.importer.batch.model.Row;
 import org.avni.server.service.GroupSubjectService;
 import org.avni.server.service.HouseholdService;
 import org.joda.time.LocalDate;
+import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -35,8 +36,6 @@ public class GroupSubjectWriter implements ItemWriter<Row>, Serializable {
     private final HouseholdService householdService;
     private final GroupSubjectService groupSubjectService;
 
-    private DateCreator dateCreator;
-
     @Autowired
     public GroupSubjectWriter(GroupSubjectRepository groupSubjectRepository,
                               GroupRoleRepository groupRoleRepository,
@@ -51,12 +50,11 @@ public class GroupSubjectWriter implements ItemWriter<Row>, Serializable {
         this.individualRelationshipRepository = individualRelationshipRepository;
         this.householdService = householdService;
         this.groupSubjectService = groupSubjectService;
-        this.dateCreator = new DateCreator();
     }
 
     @Override
-    public void write(List<? extends Row> rows) throws Exception {
-        for (Row row : rows) write(row);
+    public void write(Chunk<? extends Row> chunk) throws Exception {
+        for (Row row : chunk.getItems()) write(row);
     }
 
     private void write(Row row) throws Exception {
@@ -107,6 +105,10 @@ public class GroupSubjectWriter implements ItemWriter<Row>, Serializable {
     private GroupSubject getOrCreateGroupSubject(Row row, List<String> errorMsgs) {
 //        boolean isHouseholdUpload = Arrays.asList(row.getHeaders()).contains(householdMemberHeaders.groupId);
 //        String groupIdIdentifier = isHouseholdUpload ? householdMemberHeaders.groupId : groupMemberHeaders.groupId;
+        if (row.getHeaders().length == 0) {
+            errorMsgs.add("No headers found in file");
+            return null;
+        }
         String groupIdIdentifier = row.getHeaders()[0];  //hack assumes group id/household id is the first element. Added to handle dynamic group id header values.
         String groupId = row.get(groupIdIdentifier);
         String memberId = row.get(GroupMemberHeaders.memberId);
@@ -134,7 +136,7 @@ public class GroupSubjectWriter implements ItemWriter<Row>, Serializable {
             errorMsgs.add(String.format("Could not find '%s' - '%s'", GroupMemberHeaders.memberId, memberId));
             return null;
         }
-        existingGroupSubject = groupSubjectRepository.findByGroupSubjectAndMemberSubject(existingGroup, existingMember);
+        existingGroupSubject = groupSubjectRepository.findByGroupSubjectAndMemberSubjectAndIsVoidedFalse(existingGroup, existingMember);
 
         return existingGroupSubject == null ? createNewGroupSubject(existingGroup, existingMember, errorMsgs) : existingGroupSubject;
     }
@@ -198,6 +200,7 @@ public class GroupSubjectWriter implements ItemWriter<Row>, Serializable {
     }
 
     private void saveMembershipDates(Row row, GroupSubject groupSubject, List<String> errorMsgs) {
+        DateCreator dateCreator = new DateCreator();
         LocalDate membershipStartDate = dateCreator.getDate(row, GroupMemberHeaders.membershipStartDate, errorMsgs, null);
         groupSubject.setMembershipStartDate(membershipStartDate != null ? membershipStartDate.toDateTimeAtStartOfDay() : LocalDate.now().toDateTimeAtCurrentTime());
 

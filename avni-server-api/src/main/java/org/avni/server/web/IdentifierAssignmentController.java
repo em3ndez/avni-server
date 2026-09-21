@@ -1,42 +1,41 @@
 package org.avni.server.web;
 
-import org.avni.server.domain.CHSEntity;
-import org.avni.server.web.response.slice.SlicedResources;
-import org.joda.time.DateTime;
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.IdentifierAssignmentRepository;
-import org.avni.server.dao.IdentifierSourceRepository;
 import org.avni.server.dao.IndividualRepository;
 import org.avni.server.dao.ProgramEnrolmentRepository;
+import org.avni.server.domain.CHSEntity;
 import org.avni.server.domain.IdentifierAssignment;
 import org.avni.server.domain.User;
 import org.avni.server.service.IdentifierAssignmentService;
 import org.avni.server.service.UserService;
 import org.avni.server.web.request.IdentifierAssignmentRequest;
+import org.avni.server.web.response.slice.SlicedResources;
+import org.joda.time.DateTime;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Pageable;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.Link;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
+import static org.avni.server.web.resourceProcessors.ResourceProcessor.addAuditFields;
 
 @RestController
 @Transactional
 public class IdentifierAssignmentController extends AbstractController<IdentifierAssignment> implements RestControllerResourceProcessor<IdentifierAssignment> {
-
-    private static org.slf4j.Logger logger = LoggerFactory.getLogger(IndividualController.class);
-    private IdentifierAssignmentRepository identifierAssignmentRepository;
-    private UserService userService;
-    private IdentifierAssignmentService identifierAssignmentService;
-    private IndividualRepository individualRepository;
-    private ProgramEnrolmentRepository programEnrolmentRepository;
+    private static final org.slf4j.Logger logger = LoggerFactory.getLogger(IndividualController.class);
+    private final IdentifierAssignmentRepository identifierAssignmentRepository;
+    private final UserService userService;
+    private final IdentifierAssignmentService identifierAssignmentService;
+    private final IndividualRepository individualRepository;
+    private final ProgramEnrolmentRepository programEnrolmentRepository;
 
     @Autowired
-    public IdentifierAssignmentController(IdentifierAssignmentRepository identifierAssignmentRepository, IdentifierSourceRepository identifierSourceRepository, UserService userService, IdentifierAssignmentService identifierAssignmentService, IndividualRepository individualRepository, ProgramEnrolmentRepository programEnrolmentRepository) {
+    public IdentifierAssignmentController(IdentifierAssignmentRepository identifierAssignmentRepository, UserService userService, IdentifierAssignmentService identifierAssignmentService, IndividualRepository individualRepository, ProgramEnrolmentRepository programEnrolmentRepository) {
         this.identifierAssignmentRepository = identifierAssignmentRepository;
         this.userService = userService;
         this.identifierAssignmentService = identifierAssignmentService;
@@ -58,25 +57,27 @@ public class IdentifierAssignmentController extends AbstractController<Identifie
     @RequestMapping(value = "/identifierAssignment", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
     @Transactional
-    public PagedResources<Resource<IdentifierAssignment>> get(
+    public CollectionModel<EntityModel<IdentifierAssignment>> get(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
+            @RequestParam(value = "deviceId", required = false) String deviceId,
             Pageable pageable) {
         User currentUser = userService.getCurrentUser();
-        identifierAssignmentService.generateIdentifiersIfNecessary(currentUser);
+        identifierAssignmentService.generateIdentifiersIfNecessary(currentUser, deviceId);
 
-        return wrap(identifierAssignmentRepository.findByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullOrderByAssignmentOrderAsc(currentUser, CHSEntity.toDate(lastModifiedDateTime), pageable));
+        return wrap(identifierAssignmentRepository.findByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullAndDeviceIdEqualsOrderByAssignmentOrderAsc(currentUser, CHSEntity.toDate(lastModifiedDateTime), deviceId, pageable));
     }
 
     @RequestMapping(value = "/identifierAssignment/v2", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
     @Transactional
-    public SlicedResources<Resource<IdentifierAssignment>> getAsSlice(
+    public SlicedResources<EntityModel<IdentifierAssignment>> getAsSlice(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
+            @RequestParam(value = "deviceId", required = false) String deviceId,
             Pageable pageable) {
         User currentUser = userService.getCurrentUser();
-        identifierAssignmentService.generateIdentifiersIfNecessary(currentUser);
+        identifierAssignmentService.generateIdentifiersIfNecessary(currentUser, deviceId);
 
-        return wrap(identifierAssignmentRepository.findSliceByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullOrderByAssignmentOrderAsc(currentUser, CHSEntity.toDate(lastModifiedDateTime), pageable));
+        return wrap(identifierAssignmentRepository.findSliceByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullAndDeviceIdEqualsOrderByAssignmentOrderAsc(currentUser, CHSEntity.toDate(lastModifiedDateTime), deviceId, pageable));
     }
 
     @RequestMapping(value = "/identifierAssignments", method = RequestMethod.POST)
@@ -101,20 +102,22 @@ public class IdentifierAssignmentController extends AbstractController<Identifie
             identifierAssignment.setProgramEnrolment(programEnrolmentRepository.findByUuid(identifierAssignmentRequest.getProgramEnrolmentUUID()));
         }
 
+        identifierAssignment.setUsed(identifierAssignmentRequest.isUsed());
         return identifierAssignment;
     }
 
     @Override
-    public Resource<IdentifierAssignment> process(Resource<IdentifierAssignment> resource) {
+    public EntityModel<IdentifierAssignment> process(EntityModel<IdentifierAssignment> resource) {
         IdentifierAssignment identifierAssignment = resource.getContent();
         resource.removeLinks();
         if (identifierAssignment.getProgramEnrolment() != null) {
-            resource.add(new Link(identifierAssignment.getProgramEnrolment().getUuid(), "programEnrolmentUUID"));
+            resource.add(Link.of(identifierAssignment.getProgramEnrolment().getUuid(), "programEnrolmentUUID"));
         }
         if (identifierAssignment.getIndividual() != null) {
-            resource.add(new Link(identifierAssignment.getIndividual().getUuid(), "individualUUID"));
+            resource.add(Link.of(identifierAssignment.getIndividual().getUuid(), "individualUUID"));
         }
-        resource.add(new Link(identifierAssignment.getIdentifierSource().getUuid(), "identifierSourceUUID"));
+        resource.add(Link.of(identifierAssignment.getIdentifierSource().getUuid(), "identifierSourceUUID"));
+        addAuditFields(identifierAssignment, resource);
         return resource;
     }
 }

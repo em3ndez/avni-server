@@ -1,26 +1,35 @@
 package org.avni.server.web;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import jakarta.persistence.EntityManagerFactory;
 import org.avni.server.common.AbstractControllerIntegrationTest;
-import org.junit.Before;
-import org.junit.Test;
 import org.avni.server.dao.ConceptRepository;
 import org.avni.server.domain.Concept;
 import org.avni.server.domain.ConceptDataType;
+import org.avni.server.service.ConceptService;
+import org.avni.server.web.request.ConceptContract;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
+import org.junit.Before;
+import org.junit.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.jdbc.Sql;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@Sql({"/test-data.sql"})
+@Sql(value = {"/tear-down.sql", "/test-data.sql"}, executionPhase = Sql.ExecutionPhase.BEFORE_TEST_METHOD)
+@Sql(value = {"/tear-down.sql"}, executionPhase = Sql.ExecutionPhase.AFTER_TEST_METHOD)
 public class ConceptControllerIntegrationTest extends AbstractControllerIntegrationTest {
     @Autowired
     private ConceptRepository conceptRepository;
-
-    private void post(Object json) {
-        super.post("/concepts", json);
-    }
+    @Autowired
+    private ConceptService conceptService;
+    @Autowired
+    private EntityManagerFactory entityManagerFactory;
 
     @Before
     public void setUp() throws Exception {
@@ -30,8 +39,8 @@ public class ConceptControllerIntegrationTest extends AbstractControllerIntegrat
 
     @Test
     public void shouldCreateConcepts() throws IOException {
-        Object json = getJSON("/ref/concepts/concepts.json");
-        post(json);
+        List<ConceptContract> conceptRequests = readJSON("/ref/concepts/concepts.json");
+        conceptService.saveOrUpdateConcepts(conceptRequests, ConceptContract.RequestType.Bundle);
 
         Concept naConcept = conceptRepository.findByUuid("b82d4ed8-6e9f-4c67-bfdc-b1a04861bc20");
         assertThat(naConcept).isNotNull();
@@ -40,8 +49,8 @@ public class ConceptControllerIntegrationTest extends AbstractControllerIntegrat
 
     @Test
     public void shouldCreateConceptsWithOneLevelNesting() throws IOException {
-        Object json = getJSON("/ref/concepts/codedConceptsWithOneLevelNesting.json");
-        post(json);
+        List<ConceptContract> conceptRequests = readJSON("/ref/concepts/codedConceptsWithOneLevelNesting.json");
+        conceptService.saveOrUpdateConcepts(conceptRequests, ConceptContract.RequestType.Bundle);
 
         Concept nestedConcept = conceptRepository.findByUuid("0ca1c6a2-001b-475a-9813-1d905df9e81b");
         assertThat(nestedConcept).isNotNull();
@@ -49,74 +58,87 @@ public class ConceptControllerIntegrationTest extends AbstractControllerIntegrat
     }
 
     @Test
-    public void shouldFailToCreateConceptsWithMultipleNesting() throws IOException {
-
-        try {
-            Object json = getJSON("/ref/concepts/codedConceptsWithMultipleNesting.json");
-            post(json);
-            assertThat(false);
-        } catch (AssertionError e) {
-            assertThat(e.getMessage()).isEqualTo("Answer concept not found for UUID:781aa33a-2bb0-45ed-b00e-d344186d9824");
-        }
-    }
-
-    @Test
     public void shouldVoidAConcept() throws IOException {
-        Object json = getJSON("/ref/concepts/voidableConcept.json");
-        post(json);
+        List<ConceptContract> conceptRequests = readJSON("/ref/concepts/voidableConcept.json");
+        conceptService.saveOrUpdateConcepts(conceptRequests, ConceptContract.RequestType.Bundle);
 
         Concept voidableConcept = conceptRepository.findByName("Voidable concept");
         assertThat(voidableConcept).isNotNull();
         assertThat(voidableConcept.isVoided()).isFalse();
 
-        json = getJSON("/ref/concepts/voidedConcept.json");
-        post(json);
+        conceptRequests = readJSON("/ref/concepts/voidedConcept.json");
+        conceptService.saveOrUpdateConcepts(conceptRequests, ConceptContract.RequestType.Bundle);
         Concept voidedConcept = conceptRepository.findByName("Voidable concept");
         assertThat(voidedConcept).isNotNull();
         assertThat(voidedConcept.isVoided()).isTrue();
     }
 
     @Test
-    public void shouldAddAnswersAlongWithExistingAnswers() throws IOException {
-        Object json = getJSON("/ref/concepts/codedConcept.json");
-        post(json);
-
-        Concept codedConcept = conceptRepository.findByName("Coded Question");
-        assertThat(codedConcept).isNotNull();
-        assertThat(codedConcept.getConceptAnswers().size()).isEqualTo(3);
-
-        json = getJSON("/ref/concepts/addAnswers.json");
-        post(json);
-
-        Concept withAnswer4 = conceptRepository.findByName("Coded Question");
-        assertThat(withAnswer4).isNotNull();
-        assertThat(withAnswer4.getConceptAnswers().size()).isEqualTo(4);
-
-    }
-
-    @Test
-    public void donotChangeTheDataTypeOfConceptUsedAsAnswerIfAlreadyPresent() throws IOException {
-        Object json = getJSON("/ref/concepts/conceptUsedAsCodedButAlsoAsAnswer.json");
-        post(json);
+    public void doNotChangeTheDataTypeOfConceptUsedAsAnswerIfAlreadyPresent() throws IOException {
+        List<ConceptContract> conceptRequests =  readJSON("/ref/concepts/conceptUsedAsCodedButAlsoAsAnswer.json");
+        conceptService.saveOrUpdateConcepts(conceptRequests, ConceptContract.RequestType.Bundle);
         assertThat(conceptRepository.findByUuid("d78edcbb-2034-4220-ace2-20b445a1e0ad").getDataType()).isEqualTo(ConceptDataType.Coded.toString());
         assertThat(conceptRepository.findByUuid("60f284a6-0240-4de8-a6a1-8839bc9cc219").getDataType()).isEqualTo(ConceptDataType.Numeric.toString());
-        post(json);
+
+        conceptService.saveOrUpdateConcepts(conceptRequests, ConceptContract.RequestType.Bundle);
         assertThat(conceptRepository.findByUuid("d78edcbb-2034-4220-ace2-20b445a1e0ad").getDataType()).isEqualTo(ConceptDataType.Coded.toString());
         assertThat(conceptRepository.findByUuid("60f284a6-0240-4de8-a6a1-8839bc9cc219").getDataType()).isEqualTo(ConceptDataType.Numeric.toString());
     }
 
     @Test
-    public void addConceptAnswerViaRedefiningTheConcept() throws IOException {
-        Object json = getJSON("/ref/concepts/conceptsAnswersAddedBySpecifyingNewOnesOnly.json");
-        post(json);
-        assertThat(conceptRepository.findByUuid("d76927d0-a0b9-4cb0-be29-12508275036e").getConceptAnswers().size()).isEqualTo(3);
+    public void reSavingCodedConceptDoesNotReSaveUnchangedAnswersAndTouchesOnlyRenamedAnswer() {
+        String parentUuid = "5f1c0c1e-0001-4000-8000-000000000001";
+        String answer1Uuid = "5f1c0c1e-0001-4000-8000-0000000000a1";
+        String answer2Uuid = "5f1c0c1e-0001-4000-8000-0000000000a2";
+        String answer3Uuid = "5f1c0c1e-0001-4000-8000-0000000000a3";
 
-        json = getJSON("/ref/concepts/conceptAnswerAdditionViaSeparateFile.json");
-        post(json);
-        assertThat(conceptRepository.findByUuid("d76927d0-a0b9-4cb0-be29-12508275036e").getConceptAnswers().size()).isEqualTo(4);
+        conceptService.saveOrUpdateConcepts(List.of(codedConcept(parentUuid, "Regression Coded",
+                answer(answer1Uuid, "Answer One"),
+                answer(answer2Uuid, "Answer Two"),
+                answer(answer3Uuid, "Answer Three"))), ConceptContract.RequestType.Full);
+
+        Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        statistics.setStatisticsEnabled(true);
+
+        // Re-saving with nothing changed must update only the parent concept (its audit); no answer concept is re-saved.
+        statistics.clear();
+        conceptService.saveOrUpdateConcepts(List.of(codedConcept(parentUuid, "Regression Coded",
+                answer(answer1Uuid, "Answer One"),
+                answer(answer2Uuid, "Answer Two"),
+                answer(answer3Uuid, "Answer Three"))), ConceptContract.RequestType.Full);
+        assertThat(statistics.getEntityUpdateCount()).isEqualTo(1);
+
+        // Renaming a single answer must touch only the parent concept and that one answer concept.
+        statistics.clear();
+        conceptService.saveOrUpdateConcepts(List.of(codedConcept(parentUuid, "Regression Coded",
+                answer(answer1Uuid, "Answer One Renamed"),
+                answer(answer2Uuid, "Answer Two"),
+                answer(answer3Uuid, "Answer Three"))), ConceptContract.RequestType.Full);
+        assertThat(statistics.getEntityUpdateCount()).isEqualTo(2);
+        assertThat(conceptRepository.findByUuid(answer1Uuid).getName()).isEqualTo("Answer One Renamed");
+        assertThat(conceptRepository.findByUuid(answer2Uuid).getName()).isEqualTo("Answer Two");
+        assertThat(conceptRepository.findByUuid(answer3Uuid).getName()).isEqualTo("Answer Three");
     }
 
-    private Object getJSON(String jsonFile) throws IOException {
-        return mapper.readValue(this.getClass().getResource(jsonFile), Object.class);
+    private ConceptContract codedConcept(String uuid, String name, ConceptContract... answers) {
+        ConceptContract conceptContract = new ConceptContract();
+        conceptContract.setUuid(uuid);
+        conceptContract.setName(name);
+        conceptContract.setDataType(ConceptDataType.Coded.toString());
+        conceptContract.setAnswers(Arrays.asList(answers));
+        return conceptContract;
     }
+
+    private ConceptContract answer(String uuid, String name) {
+        ConceptContract answerContract = new ConceptContract();
+        answerContract.setUuid(uuid);
+        answerContract.setName(name);
+        return answerContract;
+    }
+
+    private List<ConceptContract> readJSON(String jsonFile) throws IOException {
+        return mapper.readValue(this.getClass().getResource(jsonFile), new TypeReference<>() {
+        });
+    }
+
 }

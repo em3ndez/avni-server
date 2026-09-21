@@ -2,14 +2,17 @@ package org.avni.server.web.request.webapp;
 
 import org.avni.server.application.FormMapping;
 import org.avni.server.application.Format;
+import org.avni.server.domain.JsonObject;
 import org.avni.server.domain.OperationalSubjectType;
 import org.avni.server.domain.SubjectType;
 import org.avni.server.web.request.FormatContract;
 import org.avni.server.web.request.GroupRoleContract;
+import org.avni.server.web.request.attendance.AttendanceTypeContract;
 import org.joda.time.DateTime;
-import org.springframework.hateoas.core.Relation;
+import org.springframework.hateoas.server.core.Relation;
 
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * This class represents a combined entity representing one to one mapping of SubjectType and OperationalSubjectType.
@@ -35,6 +38,7 @@ public class SubjectTypeContractWeb {
     private String type;
     private String subjectSummaryRule;
     private String programEligibilityCheckRule;
+    private String memberAdditionEligibilityCheckRule;
     private List<String> locationTypeUUIDs;
     private boolean allowEmptyLocation;
     private boolean allowProfilePicture;
@@ -53,6 +57,9 @@ public class SubjectTypeContractWeb {
     private Boolean isSyncRegistrationConcept2Usable;
     private String nameHelpText;
     private Long subjectTypeId;
+    private JsonObject settings;
+    private Boolean attendanceEnabled;
+    private List<AttendanceTypeContract> attendanceTypes;
 
     public static SubjectTypeContractWeb fromOperationalSubjectType(OperationalSubjectType operationalSubjectType, FormMapping formMapping) {
         SubjectTypeContractWeb contract = new SubjectTypeContractWeb();
@@ -69,7 +76,11 @@ public class SubjectTypeContractWeb {
         contract.setModifiedDateTime(operationalSubjectType.getLastModifiedDateTime());
         contract.setGroup(operationalSubjectType.isGroup());
         contract.setHousehold(operationalSubjectType.isHousehold());
-        contract.setGroupRoles(subjectType.getGroupRolesContract());
+        List<GroupRoleContract> groupRoleContracts = subjectType.getGroupRoles().stream()
+                .filter(r -> !r.isVoided())
+                .map(GroupRoleContract::fromEntity)
+                .collect(Collectors.toList());
+        contract.setGroupRoles(groupRoleContracts);
         contract.setActive(subjectType.getActive());
         contract.setAllowEmptyLocation(subjectType.isAllowEmptyLocation());
         contract.setAllowProfilePicture(subjectType.isAllowProfilePicture());
@@ -77,6 +88,7 @@ public class SubjectTypeContractWeb {
         contract.setType(operationalSubjectType.getType().name());
         contract.setSubjectSummaryRule(operationalSubjectType.getSubjectSummaryRule());
         contract.setProgramEligibilityCheckRule(operationalSubjectType.getProgramEligibilityCheckRule());
+        contract.setMemberAdditionEligibilityCheckRule(operationalSubjectType.getMemberAdditionEligibilityCheckRule());
         contract.setValidFirstNameFormat(FormatContract.fromFormat(operationalSubjectType.getValidFirstNameFormat()));
         contract.setAllowMiddleName(operationalSubjectType.getSubjectType().isAllowMiddleName());
         contract.setValidMiddleNameFormat(FormatContract.fromFormat(operationalSubjectType.getSubjectType().getValidMiddleNameFormat()));
@@ -91,7 +103,10 @@ public class SubjectTypeContractWeb {
         contract.setSyncRegistrationConcept2Usable(subjectType.isSyncRegistrationConcept2Usable());
         contract.setNameHelpText(subjectType.getNameHelpText());
         contract.setSubjectTypeId(subjectType.getId());
-        contract.setEnableRegistrationApproval(formMapping.isEnableApproval());
+        contract.setSettings(subjectType.getSettings());
+        contract.setAttendanceEnabled(subjectType.isAttendanceEnabled());
+        if (formMapping != null)
+            contract.setEnableRegistrationApproval(formMapping.isEnableApproval());
 
         return contract;
     }
@@ -248,6 +263,14 @@ public class SubjectTypeContractWeb {
         this.programEligibilityCheckRule = programEligibilityCheckRule;
     }
 
+    public String getMemberAdditionEligibilityCheckRule() {
+        return memberAdditionEligibilityCheckRule;
+    }
+
+    public void setMemberAdditionEligibilityCheckRule(String memberAdditionEligibilityCheckRule) {
+        this.memberAdditionEligibilityCheckRule = memberAdditionEligibilityCheckRule;
+    }
+
     public boolean isAllowEmptyLocation() {
         return allowEmptyLocation;
     }
@@ -390,5 +413,29 @@ public class SubjectTypeContractWeb {
 
     public void setEnableRegistrationApproval(boolean enableRegistrationApproval) {
         this.enableRegistrationApproval = enableRegistrationApproval;
+    }
+
+    public JsonObject getSettings() {
+        return settings;
+    }
+
+    public void setSettings(JsonObject settings) {
+        this.settings = settings;
+    }
+
+    public Boolean isAttendanceEnabled() {
+        return attendanceEnabled;
+    }
+
+    public void setAttendanceEnabled(Boolean attendanceEnabled) {
+        this.attendanceEnabled = attendanceEnabled;
+    }
+
+    public List<AttendanceTypeContract> getAttendanceTypes() {
+        return attendanceTypes;
+    }
+
+    public void setAttendanceTypes(List<AttendanceTypeContract> attendanceTypes) {
+        this.attendanceTypes = attendanceTypes;
     }
 }

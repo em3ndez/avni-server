@@ -1,8 +1,11 @@
 package org.avni.server.service;
 
+import jakarta.persistence.EntityManager;
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.builder.BuilderException;
 import org.avni.server.dao.CatchmentRepository;
 import org.avni.server.dao.LocationRepository;
+import org.avni.server.dao.RoleSwitchableRepository;
 import org.avni.server.domain.AddressLevel;
 import org.avni.server.domain.Catchment;
 import org.avni.server.domain.Organisation;
@@ -24,16 +27,15 @@ import java.util.stream.Collectors;
 import static java.util.Objects.isNull;
 
 @Service
-public class CatchmentService {
+public class CatchmentService extends RoleSwitchableRepository {
     private final CatchmentRepository catchmentRepository;
-    private final UserService userService;
     private final LocationRepository locationRepository;
     private final Logger logger;
 
     @Autowired
-    public CatchmentService(CatchmentRepository catchmentRepository, UserService userService, LocationRepository locationRepository) {
+    public CatchmentService(EntityManager entityManager, CatchmentRepository catchmentRepository, LocationRepository locationRepository) {
+        super(entityManager);
         this.catchmentRepository = catchmentRepository;
-        this.userService = userService;
         this.locationRepository = locationRepository;
         logger = LoggerFactory.getLogger(this.getClass());
     }
@@ -52,7 +54,7 @@ public class CatchmentService {
         return catchmentRepository.save(catchment);
     }
 
-    public List<Catchment> saveAllCatchments(CatchmentsContract catchmentsContract, Organisation organisation) throws BuilderException {
+    public List<Catchment> saveAllCatchments(CatchmentsContract catchmentsContract, Organisation organisation) {
         List<Catchment> catchments = new ArrayList<>();
         for (CatchmentContract catchmentRequest : catchmentsContract.getCatchments()) {
             logger.info(String.format("Processing catchment request: %s", catchmentRequest.toString()));
@@ -71,13 +73,14 @@ public class CatchmentService {
             addAddressLevels(catchmentRequest, catchment);
             removeObsoleteAddressLevelsFromCatchment(catchment, catchmentRequest);
             catchment.setOrganisationId(organisation.getId());
+            catchment.setVoided(catchmentRequest.isVoided());
 
             catchments.add(catchmentRepository.save(catchment));
         }
         return catchments;
     }
 
-    private void addAddressLevels(CatchmentContract catchmentRequest, Catchment catchment) throws BuilderException {
+    private void addAddressLevels(CatchmentContract catchmentRequest, Catchment catchment) {
         List<AddressLevelContract> locations = catchmentRequest.getLocations();
         if(isNull(locations) || locations.isEmpty()) {
             logger.warn(String.format("Locations not defined in Catchment {uuid='%s',locations=undefined,...}", catchment.getUuid()));
@@ -112,5 +115,15 @@ public class CatchmentService {
     private boolean catchmentExistsWithSameNameAndDifferentUUID(CatchmentContract catchmentRequest) {
         Catchment catchment = catchmentRepository.findByName(catchmentRequest.getName());
         return catchment != null && !catchment.getUuid().equals(catchmentRequest.getUuid());
+    }
+
+    @Transactional(readOnly = true)
+    public boolean hasLocation(AddressLevel addressLevel, Catchment catchment) {
+        try {
+            setRoleToNone();
+            return !locationRepository.getCatchmentAddressForCatchmentIdAndAddressLevelId(addressLevel.getId(), catchment.getId()).isEmpty();
+        } finally {
+            setRoleBackToUser();
+        }
     }
 }

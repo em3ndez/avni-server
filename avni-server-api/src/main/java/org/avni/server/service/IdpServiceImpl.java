@@ -1,5 +1,7 @@
 package org.avni.server.service;
 
+import org.avni.messaging.domain.EntityType;
+import org.avni.server.common.Messageable;
 import org.avni.server.domain.OrganisationConfig;
 import org.avni.server.domain.User;
 import org.avni.server.framework.context.SpringProfiles;
@@ -19,12 +21,12 @@ public abstract class IdpServiceImpl implements IdpService {
         return true;
     }
 
+    @Messageable(EntityType.User)
     @Override
-    public UserCreateStatus createUserIfNotExists(User user, OrganisationConfig organisationConfig) {
+    public void createUserIfNotExists(User user, OrganisationConfig organisationConfig) throws IDPException {
         if (!this.exists(user)) {
-            return this.createUser(user, organisationConfig);
+            this.createUser(user, organisationConfig);
         }
-        return null;
     }
 
     public static String getDefaultPassword(User user) {

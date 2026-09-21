@@ -27,6 +27,7 @@ import org.mockito.Mock;
 import java.io.IOException;
 import java.util.*;
 
+import static org.avni.server.exporter.v2.LongitudinalExportRequestFieldNameConstants.UUID;
 import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
@@ -72,7 +73,7 @@ public class ExportV2CSVFieldExtractorTest {
     public void extractIndividualWithoutObservations() throws IOException {
         User user = new UserBuilder().build();
         exportOutput.setUuid("st1");
-        SubjectType subjectType = new SubjectTypeBuilder().withUuid("st1").withName("ST1").build();
+        SubjectType subjectType = new SubjectTypeBuilder().setUuid("st1").setName("ST1").build();
         Individual individual = new SubjectBuilder().withSubjectType(subjectType).withAuditUser(user).withUUID("s1").build();
         LongitudinalExportItemRow longitudinalExportItemRow = new LongitudinalExportItemRowBuilder().withSubject(individual).build();
 
@@ -95,7 +96,7 @@ public class ExportV2CSVFieldExtractorTest {
     public void extractIndividualWithQuestionGroup() throws IOException {
         User user = new UserBuilder().build();
         exportOutput.setUuid("st1");
-        SubjectType subjectType = new SubjectTypeBuilder().withUuid("st1").withName("ST1").build();
+        SubjectType subjectType = new SubjectTypeBuilder().setUuid("st1").setName("ST1").build();
         Map<String, String> qgObs = new HashMap<String, String>() {{
             put("c2", "2");
             put("c3", "3");
@@ -107,6 +108,9 @@ public class ExportV2CSVFieldExtractorTest {
         when(addressLevelService.getAllAddressLevelTypeNames()).thenReturn(Arrays.asList("State", "District", "Block"));
         when(exportJobParametersRepository.findByUuid("st1")).thenReturn(exportJobParameters);
         when(subjectTypeRepository.findByUuid(any())).thenReturn(subjectType);
+
+        exportOutput = new ExportOutputBuilder().forSubjectType("st1").withFields(Arrays.asList(UUID, "c2")).build();
+        when(exportJobService.getExportOutput(any())).thenReturn(exportOutput);
 
         Concept concept1 = new ConceptBuilder().withUuid("c1").withName("C1").withDataType(ConceptDataType.QuestionGroup).build();
         Concept concept2 = new ConceptBuilder().withUuid("c2").withName("C2").withDataType(ConceptDataType.Text).build();
@@ -134,7 +138,7 @@ public class ExportV2CSVFieldExtractorTest {
     public void extractIndividualWithRepeatableQuestionGroup() throws IOException {
         User user = new UserBuilder().build();
         exportOutput.setUuid("st1");
-        SubjectType subjectType = new SubjectTypeBuilder().withUuid("st1").withName("ST1").build();
+        SubjectType subjectType = new SubjectTypeBuilder().setUuid("st1").setName("ST1").build();
         Map<String, String> qgObs1 = new HashMap<String, String>() {{
             put("c2", "21");
             put("c3", "31");
@@ -150,6 +154,8 @@ public class ExportV2CSVFieldExtractorTest {
         when(addressLevelService.getAllAddressLevelTypeNames()).thenReturn(Arrays.asList("State", "District", "Block"));
         when(exportJobParametersRepository.findByUuid("st1")).thenReturn(exportJobParameters);
         when(subjectTypeRepository.findByUuid(any())).thenReturn(subjectType);
+        exportOutput = new ExportOutputBuilder().forSubjectType("st1").withFields(Arrays.asList(UUID, "c2", "c3")).build();
+        when(exportJobService.getExportOutput(any())).thenReturn(exportOutput);
 
         Concept concept1 = new ConceptBuilder().withUuid("c1").withName("C1").withDataType(ConceptDataType.QuestionGroup).build();
         Concept concept2 = new ConceptBuilder().withUuid("c2").withName("C2").withDataType(ConceptDataType.Text).build();

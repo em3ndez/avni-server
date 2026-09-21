@@ -1,16 +1,26 @@
 package org.avni.server.framework.rest;
 
+import org.avni.server.StringToJodaDateTimeConverter;
 import org.avni.server.domain.*;
 import org.avni.server.domain.accessControl.GroupPrivilege;
 import org.avni.server.domain.accessControl.Privilege;
+import org.avni.server.domain.organisation.OrganisationCategory;
+import org.avni.server.domain.organisation.OrganisationStatus;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.convert.support.ConfigurableConversionService;
 import org.springframework.data.rest.core.config.RepositoryRestConfiguration;
-import org.springframework.data.rest.webmvc.config.RepositoryRestConfigurerAdapter;
+import org.springframework.data.rest.webmvc.config.RepositoryRestConfigurer;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
 
 @Configuration
-public class RepositoryConfig extends RepositoryRestConfigurerAdapter {
+public class RepositoryConfig implements RepositoryRestConfigurer {
     @Override
-    public void configureRepositoryRestConfiguration(RepositoryRestConfiguration config) {
+    public void configureConversionService(ConfigurableConversionService conversionService) {
+        conversionService.addConverter(new StringToJodaDateTimeConverter());
+    }
+
+    @Override
+    public void configureRepositoryRestConfiguration(RepositoryRestConfiguration config, CorsRegistry cors) {
         config.exposeIdsFor(User.class);
         config.exposeIdsFor(Organisation.class);
         config.exposeIdsFor(Catchment.class);
@@ -30,12 +40,33 @@ public class RepositoryConfig extends RepositoryRestConfigurerAdapter {
         config.exposeIdsFor(GroupPrivilege.class);
         config.exposeIdsFor(UserGroup.class);
         config.exposeIdsFor(GroupRole.class);
-        config.exposeIdsFor(Card.class);
+        config.exposeIdsFor(ReportCard.class);
         config.exposeIdsFor(Dashboard.class);
         config.exposeIdsFor(News.class);
         config.exposeIdsFor(Comment.class);
         config.exposeIdsFor(CommentThread.class);
         config.exposeIdsFor(RuleFailureTelemetry.class);
         config.exposeIdsFor(Individual.class);
+        config.exposeIdsFor(OrganisationCategory.class);
+        config.exposeIdsFor(OrganisationStatus.class);
+
+        //TODO
+        /**
+         * After we upgrade to a higher spring-boot version(2.1 and above), we would also have updated spring-data-repository plugin,
+         * which would allow us to specify a simple 2-line configuration to not expose POST, PUT, PATCH and DELETE methods,
+         * using ExposureConfiguration. After which, we could do away with following classes :
+         * 1. AvniCrudRepository.java
+         * 2. AvniJPARepository.java
+         *
+         * And remove overridden methods from CustomCHSJpaRepository.java
+         *
+         * Sample code snippet:
+         *
+         ExposureConfiguration config = restConfig.getExposureConfiguration();
+         config.forDomainType(User.class).withItemExposure((metadata, httpMethods) ->
+         httpMethods.disable(HttpMethod.PATCH));
+         */
     }
+
+
 }

@@ -1,38 +1,52 @@
 package org.avni.server.service;
 
+import jakarta.annotation.PostConstruct;
+import jakarta.persistence.EntityNotFoundException;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ClientErrorException;
+import jakarta.ws.rs.ServerErrorException;
+import jakarta.ws.rs.core.Response;
+import org.avni.messaging.domain.EntityType;
+import org.avni.server.common.Messageable;
 import org.avni.server.domain.OrganisationConfig;
 import org.avni.server.domain.User;
 import org.avni.server.framework.context.SpringProfiles;
-import org.avni.server.util.S;
+import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.util.ObjectMapperSingleton;
 import org.jboss.resteasy.client.jaxrs.internal.ResteasyClientBuilderImpl;
 import org.keycloak.OAuth2Constants;
 import org.keycloak.admin.client.Keycloak;
 import org.keycloak.admin.client.KeycloakBuilder;
 import org.keycloak.admin.client.resource.RealmResource;
+import org.keycloak.events.EventType;
 import org.keycloak.representations.adapters.config.AdapterConfig;
 import org.keycloak.representations.idm.CredentialRepresentation;
+import org.keycloak.representations.idm.EventRepresentation;
+import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
+import org.passay.CharacterData;
+import org.passay.CharacterRule;
+import org.passay.EnglishCharacterData;
+import org.passay.PasswordGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
-import javax.persistence.EntityNotFoundException;
-import javax.ws.rs.core.Response;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.util.*;
 
 @Service("KeycloakIdpService")
 @ConditionalOnExpression("'${avni.idp.type}'=='keycloak' or '${avni.idp.type}'=='both'")
 public class KeycloakIdpService extends IdpServiceImpl {
     public static final String KEYCLOAK_ADMIN_API_CLIENT_ID = "admin-api";
+    public static final EventRepresentation DUMMY_LOGIN_EVENT = new EventRepresentation();
 
     private static final Logger logger = LoggerFactory.getLogger(KeycloakIdpService.class);
-
+    public static final int NUMBER_OF_LOGIN_EVENTS_TO_FETCH = 5;
+    public static final int LOGIN_EVENT_OFFSET = 0;
     private final AdapterConfig adapterConfig;
 
     private RealmResource realmResource;
@@ -41,6 +55,15 @@ public class KeycloakIdpService extends IdpServiceImpl {
     public KeycloakIdpService(SpringProfiles springProfiles, AdapterConfig adapterConfig) {
         super(springProfiles);
         this.adapterConfig = adapterConfig;
+        DUMMY_LOGIN_EVENT.setTime(-1L);
+    }
+
+    //Testing only
+    public KeycloakIdpService(RealmResource realmResource, AdapterConfig adapterConfig) {
+        super(null);
+        this.realmResource = realmResource;
+        this.adapterConfig = adapterConfig;
+        DUMMY_LOGIN_EVENT.setTime(-1L);
     }
 
     @PostConstruct
@@ -53,28 +76,53 @@ public class KeycloakIdpService extends IdpServiceImpl {
                 .resteasyClient(new ResteasyClientBuilderImpl().connectionPoolSize(10).build()).build();
         keycloak.tokenManager().getAccessToken();
         realmResource = keycloak.realm(adapterConfig.getRealm());
+        Optional<RealmRepresentation> first = keycloak.realms().findAll().stream().findFirst();
+        String passwordPolicy = first.get().getPasswordPolicy();
+        logger.info("Password policy: " + passwordPolicy);
         logger.info("Initialized keycloak client");
     }
 
+    @Messageable(EntityType.User)
     @Override
-    public UserCreateStatus createUser(User user, OrganisationConfig organisationConfig) {
-        createUserWithPassword(user, getDefaultPassword(user), null);
-        return null;
+    public void createUser(User user, OrganisationConfig organisationConfig) {
+        this.createUserWithPassword(user, defaultPassword(user));
     }
 
     @Override
-    public UserCreateStatus createUserWithPassword(User user, String password, OrganisationConfig organisationConfig) {
-        logger.info(String.format("Initiating create keycloak-user request | username '%s' | uuid '%s'", user.getUsername(), user.getUuid()));
+    public void createInActiveUser(User user, OrganisationConfig organisationConfig) throws IDPException {
+        throw new UnsupportedOperationException("Not implemented");
+    }
 
-        boolean isTmpPassword = S.isEmpty(password);
+    @Messageable(EntityType.User)
+    @Override
+    public void createUserWithPassword(User user, String password, OrganisationConfig organisationConfig) {
+        this.createUserWithPassword(user, password);
+    }
+
+    @Messageable(EntityType.User)
+    @Override
+    public void createSuperAdmin(User user, String password) {
+        this.createUserWithPassword(user, password);
+    }
+
+    private UserCreateStatus createUserWithPassword(User user, String password) {
+        logger.info(String.format("Initiating create keycloak-user request | username '%s' | uuid '%s'", user.getUsername(), user.getUuid()));
+        UserCreateStatus userCreateStatus = new UserCreateStatus(user, UserContextHolder.getUser());
+        userCreateStatus.setDefaultPasswordPermanent(true);
         UserRepresentation newUser = getUserRepresentation(user);
-        Response response = realmResource.users().create(newUser);
-        if (response.getStatusInfo().getFamily() == Response.Status.Family.SUCCESSFUL ||
-                response.getStatusInfo().getFamily() == Response.Status.Family.INFORMATIONAL) {
-            resetPassword(user, isTmpPassword ? getDefaultPassword(user) : password); //Just set password using same resetPassword method
+        newUser.setCredentials(List.of(getCredentialRepresentation(password)));
+        try {
+            Response response = realmResource.users().create(newUser);
+            logger.info(String.format("created keycloak-user |  Status: %d | Status Info: %s | username '%s' ",
+                response.getStatus(), response.getStatusInfo(), user.getUsername()));
+            Response.Status.Family family = response.getStatusInfo().getFamily();
+            userCreateStatus.setIdpUserCreated(family.equals(Response.Status.Family.INFORMATIONAL)
+                    || family.equals(Response.Status.Family.SUCCESSFUL));
+        } catch (Exception exception) {
+            logger.error(String.format("Failed to create keycloak-user | username '%s' ", user.getUsername()));
+            userCreateStatus.setIdpUserCreated(false);
         }
-        logger.info(String.format("created keycloak-user | username '%s'", user.getUsername()));
-        return null;
+        return userCreateStatus;
     }
 
     @Override
@@ -104,21 +152,71 @@ public class KeycloakIdpService extends IdpServiceImpl {
     }
 
     @Override
-    public void enableUser(User user) {
-        enableOrDisableUser(user, true);
+    public boolean resetPassword(User user, String password) throws IDPException {
+        logger.info(String.format("Initiating reset password keycloak-user request | username '%s' | uuid '%s'", user.getUsername(), user.getUuid()));
+        try {
+            realmResource.users().get(getUser(user).getId()).resetPassword(getCredentialRepresentation(password));
+            logger.info(String.format("password reset for keycloak-user | username '%s'", user.getUsername()));
+            return true;
+        } catch (BadRequestException ex) {
+            String reason = tryReadResponse(ex);
+            logger.error("Error in reset password:" + reason, ex);
+            throw new IDPException(reason, ex);
+        }
     }
 
-    @Override
-    public boolean resetPassword(User user, String password) {
-        logger.info(String.format("Initiating reset password keycloak-user request | username '%s' | uuid '%s'", user.getUsername(), user.getUuid()));
-        realmResource.users().get(getUser(user).getId()).resetPassword(getCredentialRepresentation(password));
-        logger.info(String.format("password reset for keycloak-user | username '%s'", user.getUsername()));
-        return true;
+    private static String tryReadResponse(BadRequestException ex) {
+        String reason;
+        try {
+            HashMap<String, Object> result = ObjectMapperSingleton.getObjectMapper().readValue((ByteArrayInputStream) ex.getResponse().getEntity(), HashMap.class);
+            reason = (String) result.getOrDefault("error_description", "Key error_description not found in response");
+        } catch (IOException e) {
+            reason = "Error parsing keycloak response message: " + e.getMessage();
+        }
+        return reason;
     }
 
     @Override
     public boolean exists(User user) {
         return !realmResource.users().search(user.getUsername(), true).isEmpty();
+    }
+
+    @Override
+    public long getLastLoginTime(User user) {
+        String userKeycloakUUID;
+        try {
+            userKeycloakUUID = getUser(user).getId();
+            List<EventRepresentation> userLoginEvents = realmResource.getEvents(
+                    Collections.singletonList(EventType.LOGIN.name()),
+                    null,
+                    userKeycloakUUID,
+                    null,
+                    null,
+                    null,
+                    LOGIN_EVENT_OFFSET,
+                    NUMBER_OF_LOGIN_EVENTS_TO_FETCH);
+            EventRepresentation lastLoginEvent = userLoginEvents
+                    .stream()
+                    .sorted((l, r) -> (int) (r.getTime() - l.getTime())) //sort latest to oldest
+                    .skip(1) //exclude the latest(current) login
+                    .findFirst()
+                    .orElse(DUMMY_LOGIN_EVENT);
+
+            return lastLoginEvent.getTime();
+        } catch (ClientErrorException | ServerErrorException ex) {
+            logger.error(String.format("Error fetching login events for user %s", user.getUsername()), ex);
+        }
+        return -1;
+    }
+
+    @Override
+    public void enableUser(User user) {
+        enableOrDisableUser(user, true);
+    }
+
+    @Override
+    public void resendPassword(User user) {
+        throw new UnsupportedOperationException("Not implemented");
     }
 
     private CredentialRepresentation getCredentialRepresentation(String password) {
@@ -164,5 +262,25 @@ public class KeycloakIdpService extends IdpServiceImpl {
         return realmResource.users().search(user.getUsername(), true).stream()
                 .findFirst()
                 .orElseThrow(EntityNotFoundException::new);
+    }
+
+    public String defaultPassword(User user) {
+        //Sample policy: length(8) and specialChars(1) and upperCase(1) and lowerCase(1) and digits(1) and notUsername(undefined) and notEmail(undefined)
+        CharacterData asciiSpecialCharacters = new CharacterData() {
+            @Override
+            public String getErrorCode() {
+                return "INSUFFICIENT_ASCIISPECIAL";
+            }
+
+            @Override
+            public String getCharacters() {
+                return "~!@#$%^&*()_+{}|:\"<>?,./;'[]-=\\";
+            }
+        };
+        return new PasswordGenerator().generatePassword(8,
+                new CharacterRule(EnglishCharacterData.LowerCase, 1),
+                new CharacterRule(EnglishCharacterData.UpperCase, 1),
+                new CharacterRule(EnglishCharacterData.Digit, 1),
+                new CharacterRule(asciiSpecialCharacters, 1));
     }
 }

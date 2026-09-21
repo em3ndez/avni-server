@@ -1,6 +1,5 @@
 package org.avni.server.dao;
 
-import java.util.Date;
 import org.avni.server.domain.IdentifierAssignment;
 import org.avni.server.domain.IdentifierSource;
 import org.avni.server.domain.User;
@@ -10,14 +9,21 @@ import org.springframework.data.domain.Slice;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
 import org.springframework.stereotype.Repository;
 
+import java.util.Date;
+import java.util.List;
+
 @Repository
 @RepositoryRestResource(collectionResourceRel = "identifierAssignment", path = "identifierAssignment")
 public interface IdentifierAssignmentRepository extends TransactionalDataRepository<IdentifierAssignment>, FindByLastModifiedDateTime<IdentifierAssignment> {
-    Page<IdentifierAssignment> findByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullOrderByAssignmentOrderAsc(User currentUser, Date lastModifiedDateTime, Pageable pageable);
+    Page<IdentifierAssignment> findByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullAndDeviceIdEqualsOrderByAssignmentOrderAsc(User currentUser, Date lastModifiedDateTime, String deviceId, Pageable pageable);
 
-    Slice<IdentifierAssignment> findSliceByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullOrderByAssignmentOrderAsc(User currentUser, Date lastModifiedDateTime, Pageable pageable);
+    Slice<IdentifierAssignment> findSliceByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullAndDeviceIdEqualsOrderByAssignmentOrderAsc(User currentUser, Date lastModifiedDateTime, String deviceId, Pageable pageable);
 
-    Integer countIdentifierAssignmentByIdentifierSourceEqualsAndAndAssignedToEqualsAndIndividualIsNullAndProgramEnrolmentIsNull(IdentifierSource identifierSource, User assignedTo);
+    Integer countIdentifierAssignmentByIdentifierSourceEqualsAndAssignedToEqualsAndIndividualIsNullAndProgramEnrolmentIsNullAndUsedIsFalseAndDeviceIdEquals(IdentifierSource identifierSource, User assignedTo, String deviceId);
 
-    boolean existsByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNull(User currentUser, Date lastModifiedDateTime);
+    boolean existsByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullAndDeviceIdEquals(User currentUser, Date lastModifiedDateTime, String deviceId);
+
+    List<IdentifierAssignment> findByAssignedToAndDeviceIdAndUsedFalseAndIsVoidedFalse(User currentUser, String deviceId);
+
+    boolean existsByIdentifierAndIdentifierSourceAndIsVoidedFalse(String identifier, IdentifierSource identifierSource);
 }

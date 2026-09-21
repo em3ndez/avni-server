@@ -1,23 +1,18 @@
 package org.avni.server.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.avni.server.application.FormMapping;
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.application.KeyType;
 import org.avni.server.application.OrganisationConfigSettingKey;
 import org.avni.server.dao.ConceptRepository;
 import org.avni.server.dao.OrganisationConfigRepository;
-import org.avni.server.dao.application.FormMappingRepository;
-import org.avni.server.domain.JsonObject;
-import org.avni.server.domain.Organisation;
-import org.avni.server.domain.OrganisationConfig;
-import org.avni.server.domain.SubjectType;
+import org.avni.server.dao.SubjectTypeRepository;
+import org.avni.server.domain.*;
 import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.projection.ConceptProjection;
 import org.avni.server.util.ObjectMapperSingleton;
 import org.avni.server.util.ReactAdminUtil;
 import org.avni.server.web.request.OrganisationConfigRequest;
-import org.avni.server.web.request.webapp.SubjectTypeSetting;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -31,7 +26,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-import javax.transaction.Transactional;
 import java.util.*;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -39,29 +33,29 @@ import java.util.stream.Collectors;
 @Service
 public class OrganisationConfigService implements NonScopeAwareService {
     public static final String EMPTY_STRING = "";
-    public static final String INDIVIDUAL = "individual";
     public static final String UUID = "uuid";
+
+    private static final Logger logger = LoggerFactory.getLogger(OrganisationConfigService.class);
+
     private final OrganisationConfigRepository organisationConfigRepository;
     private final ProjectionFactory projectionFactory;
     private final ConceptRepository conceptRepository;
     private final LocationHierarchyService locationHierarchyService;
-    private final FormMappingRepository formMappingRepository;
+    private final SubjectTypeRepository subjectTypeRepository;
     private final ObjectMapper objectMapper;
-    private final Logger logger;
 
     @Autowired
     public OrganisationConfigService(OrganisationConfigRepository organisationConfigRepository,
                                      ProjectionFactory projectionFactory,
                                      ConceptRepository conceptRepository,
-                                     FormMappingRepository formMappingRepository,
-                                     @Lazy LocationHierarchyService locationHierarchyService) {
+                                     @Lazy LocationHierarchyService locationHierarchyService,
+                                     SubjectTypeRepository subjectTypeRepository) {
         this.organisationConfigRepository = organisationConfigRepository;
         this.projectionFactory = projectionFactory;
         this.conceptRepository = conceptRepository;
         this.locationHierarchyService = locationHierarchyService;
-        this.formMappingRepository = formMappingRepository;
-        objectMapper = ObjectMapperSingleton.getObjectMapper();
-        logger = LoggerFactory.getLogger(this.getClass());
+        this.subjectTypeRepository = subjectTypeRepository;
+        this.objectMapper = ObjectMapperSingleton.getObjectMapper();
     }
 
     @Transactional
@@ -72,20 +66,59 @@ public class OrganisationConfigService implements NonScopeAwareService {
         }
         organisationConfig.setOrganisationId(organisation.getId());
         organisationConfig.setUuid(request.getUuid() == null ? java.util.UUID.randomUUID().toString() : request.getUuid());
-        organisationConfig.setSettings(request.getSettings());
+        JsonObject incomingSettings = request.getSettings();
+        stampSqliteSnapshotGenerationTimestamps(organisationConfig.getSettings(), incomingSettings);
+        organisationConfig.setSettings(incomingSettings);
         organisationConfig.setWorklistUpdationRule(request.getWorklistUpdationRule());
         organisationConfig.updateLastModifiedDateTime();
         organisationConfigRepository.save(organisationConfig);
         return organisationConfig;
     }
 
+    private void stampSqliteSnapshotGenerationTimestamps(JsonObject previousSettings, JsonObject incomingSettings) {
+        if (incomingSettings == null) return;
+        String flagKey = OrganisationConfigSettingKey.enableSqliteSnapshotGeneration.name();
+        String enabledAtKey = OrganisationConfigSettingKey.enabledSqliteSnapshotGenerationAt.name();
+        String disabledAtKey = OrganisationConfigSettingKey.disabledSqliteSnapshotGenerationAt.name();
+        boolean wasOn = previousSettings != null && Boolean.TRUE.equals(previousSettings.get(flagKey));
+        boolean isOn = Boolean.TRUE.equals(incomingSettings.get(flagKey));
+        String nowIso = DateTime.now().toString();
+        if (!wasOn && isOn) {
+            incomingSettings.put(enabledAtKey, nowIso);
+        }
+        if (wasOn && !isOn) {
+            incomingSettings.put(disabledAtKey, nowIso);
+        }
+    }
+
+    public OrganisationConfig createDefaultOrganisationConfig(Organisation organisation) {
+        OrganisationConfig organisationConfig = organisationConfigRepository.findByOrganisationId(organisation.getId());
+        if (Objects.isNull(organisationConfig)) {
+            organisationConfig = new OrganisationConfig();
+            organisationConfig.assignUUID();
+            organisationConfig.setOrganisationId(organisation.getId());
+        }
+        Map<String, Object> settings = new HashMap<>();
+        settings.put("languages", new String[]{"en"});
+        JsonObject jsonObject = new JsonObject(settings);
+        organisationConfig.setSettings(jsonObject);
+        organisationConfig.setExportSettings(new JsonObject());
+        organisationConfig.setWorklistUpdationRule(null);
+        return organisationConfigRepository.save(organisationConfig);
+    }
+
     public OrganisationConfig getOrganisationConfig(Organisation organisation) {
         return organisationConfigRepository.findByOrganisationId(organisation.getId());
     }
 
+    public OrganisationConfig getOrganisationConfigByOrgId(Long organisationId) {
+        return organisationConfigRepository.findByOrganisationId(organisationId);
+    }
+
     public LinkedHashMap<String, Object> getOrganisationSettings(Long organisationId) {
         OrganisationConfig organisationConfig = organisationConfigRepository.findByOrganisationId(organisationId);
-        JsonObject settings = new JsonObject(organisationConfig.getSettings());
+        // strip server-only keys so the webapp never receives storage routing/target metadata
+        JsonObject settings = OrganisationConfig.withoutServerOnlyKeys(new JsonObject(organisationConfig.getSettings()));
         LinkedHashMap<String, Object> organisationSettingsConceptListMap = new LinkedHashMap<>();
         List<String> conceptUuidList = new ArrayList<>();
         JsonObject searchFilters = new JsonObject().with("searchFilters", settings.getOrDefault("searchFilters", Collections.emptyList()));
@@ -108,6 +141,7 @@ public class OrganisationConfigService implements NonScopeAwareService {
                 .collect(Collectors.toList());
         organisationSettingsConceptListMap.put("organisationConfig", settings);
         organisationSettingsConceptListMap.put("conceptList", conceptList);
+        organisationSettingsConceptListMap.put("isNewImplementation", subjectTypeRepository.findAllOperational().isEmpty());
         return organisationSettingsConceptListMap;
     }
 
@@ -129,7 +163,7 @@ public class OrganisationConfigService implements NonScopeAwareService {
             settings.put(String.valueOf(OrganisationConfigSettingKey.lowestAddressLevelType), locationHierarchyService.determineAddressHierarchiesToBeSaved(organisationSettings, locationConceptUuids));
             return updateOrganisationSettings(settings);
         } catch (Exception exception) {
-            exception.printStackTrace();
+            logger.error("Error updating lowest address level type setting", exception);
         }
         return null;
     }
@@ -173,30 +207,42 @@ public class OrganisationConfigService implements NonScopeAwareService {
 
         if (request.getWorklistUpdationRule() != null)
             organisationConfig.setWorklistUpdationRule(request.getWorklistUpdationRule());
-        if (request.getSettings() != null)
+        if (request.getSettings() != null) {
+            // Stamp before merging: updateOrganisationConfigSettings mutates
+            // the persisted settings in place, after which we can't tell what
+            // the previous flag value was.
+            stampSqliteSnapshotGenerationTimestamps(organisationConfig.getSettings(), request.getSettings());
             organisationConfig.setSettings(updateOrganisationConfigSettings(request.getSettings(), organisationConfig.getSettings()));
+        }
         organisationConfig.updateAudit();
         return organisationConfigRepository.save(organisationConfig);
     }
 
     public Object getSettingsByKey(String key) {
-        Long organisationId = UserContextHolder.getUserContext().getOrganisationId();
-        OrganisationConfig organisationConfig = organisationConfigRepository.findByOrganisationId(organisationId);
-        return organisationConfig.getSettings().getOrDefault(key, Collections.EMPTY_LIST);
+        OrganisationConfig currentOrganisationConfig = this.getCurrentOrganisationConfig();
+        return currentOrganisationConfig.getSettings().getOrDefault(key, Collections.EMPTY_LIST);
     }
 
-    public void saveCustomRegistrationLocations(List<String> locationTypeUUIDs, SubjectType subjectType) {
+    public OrganisationConfig getCurrentOrganisationConfig() {
+        Long organisationId = UserContextHolder.getUserContext().getOrganisationId();
+        return organisationConfigRepository.findByOrganisationId(organisationId);
+    }
+
+    public void saveRegistrationLocation(AddressLevelType addressLevelType, SubjectType subjectType) {
+        this.saveRegistrationLocations(Collections.singletonList(addressLevelType.getUuid()), subjectType);
+    }
+
+    public void saveRegistrationLocations(List<String> locationTypeUUIDs, SubjectType subjectType) {
         Long organisationId = UserContextHolder.getUserContext().getOrganisationId();
         OrganisationConfig organisationConfig = organisationConfigRepository.findByOrganisationId(organisationId);
-        JsonObject organisationConfigSettings = organisationConfig.getSettings();
         String settingsKeyName = KeyType.customRegistrationLocations.toString();
-        List<SubjectTypeSetting> updatedCustomRegistrationLocations = getUpdatedCustomRegistrationLocations(locationTypeUUIDs, subjectType, organisationConfigSettings, settingsKeyName);
-        organisationConfigSettings.put(settingsKeyName, updatedCustomRegistrationLocations);
+        List<SubjectTypeSetting> updatedCustomRegistrationLocations = getUpdatedCustomRegistrationLocations(locationTypeUUIDs, subjectType, organisationConfig);
+        organisationConfig.getSettings().put(settingsKeyName, updatedCustomRegistrationLocations);
         organisationConfigRepository.save(organisationConfig);
     }
 
-    private List<SubjectTypeSetting> getUpdatedCustomRegistrationLocations(List<String> locationTypeUUIDs, SubjectType subjectType, JsonObject organisationConfigSettings, String settingsKeyName) {
-        List<SubjectTypeSetting> savedSettings = objectMapper.convertValue(organisationConfigSettings.getOrDefault(settingsKeyName, Collections.EMPTY_LIST), new TypeReference<List<SubjectTypeSetting>>() {});
+    private List<SubjectTypeSetting> getUpdatedCustomRegistrationLocations(List<String> locationTypeUUIDs, SubjectType subjectType, OrganisationConfig organisationConfig) {
+        List<SubjectTypeSetting> savedSettings = organisationConfig.getCustomRegistrationLocations();
         List<SubjectTypeSetting> otherSubjectTypeSettings = filterSubjectTypeSettingsBasedOn(savedSettings, setting -> !setting.getSubjectTypeUUID().equals(subjectType.getUuid()));
         SubjectTypeSetting subjectTypeSetting = new SubjectTypeSetting();
         subjectTypeSetting.setSubjectTypeUUID(subjectType.getUuid());
@@ -234,6 +280,10 @@ public class OrganisationConfigService implements NonScopeAwareService {
 
     public boolean isMessagingEnabled() {
         return isFeatureEnabled(OrganisationConfigSettingKey.enableMessaging.name());
+    }
+
+    public boolean isFailOnValidationErrorEnabled() {
+        return isFeatureEnabled(OrganisationConfigSettingKey.failOnValidationError.name());
     }
 
     @Override
@@ -300,5 +350,86 @@ public class OrganisationConfigService implements NonScopeAwareService {
         savedSettings.remove(name);
         organisationConfigRepository.save(organisationConfig);
         return ResponseEntity.ok().build();
+    }
+
+    public OrganisationConfig deleteMetadataRelatedSettings() {
+        OrganisationConfig organisationConfig = getCurrentOrganisationConfig();
+        organisationConfig.setSettings(updateOrganisationConfigSettings(getMetadataConfigSettingsAfterReset(),
+                organisationConfig.getSettings()));
+        organisationConfig.setExportSettings(new JsonObject());
+        organisationConfig.setWorklistUpdationRule(null);
+        organisationConfig.updateAudit();
+        return organisationConfigRepository.save(organisationConfig);
+    }
+
+    private JsonObject getMetadataConfigSettingsAfterReset() {
+        OrganisationConfigSettingKey[] metadataRelatedConfigSettingKeys = {
+                OrganisationConfigSettingKey.searchFilters,
+                OrganisationConfigSettingKey.customRegistrationLocations,
+                OrganisationConfigSettingKey.myDashboardFilters,
+                OrganisationConfigSettingKey.searchResultFields,
+                OrganisationConfigSettingKey.lowestAddressLevelType
+        };
+        JsonObject settings = new JsonObject();
+        Arrays.asList(metadataRelatedConfigSettingKeys).stream()
+                .forEach(settingKey -> settings.put(String.valueOf(settingKey), Collections.emptyList()));
+        settings.put(OrganisationConfig.Extension.EXTENSION_DIR, Collections.emptyList());
+        return settings;
+    }
+
+    public void setMetabaseSetupEnabled(Organisation organisation, boolean isEnabled) {
+        OrganisationConfig config = organisationConfigRepository.findByOrganisationId(organisation.getId());
+        config.setMetabaseSetupEnabled(isEnabled);
+        organisationConfigRepository.save(config);
+    }
+
+    public boolean isMetabaseSetupEnabled(Organisation organisation) {
+        OrganisationConfig config = organisationConfigRepository.findByOrganisationId(organisation.getId());
+        return config.isMetabaseSetupEnabled();
+    }
+
+    public String getMetabaseSyncStatus(Organisation organisation) {
+        OrganisationConfig config = organisationConfigRepository.findByOrganisationId(organisation.getId());
+        return config.getMetabaseSyncStatus();
+    }
+
+    public void setMetabaseSyncStatus(Organisation organisation, String status) {
+        OrganisationConfig config = organisationConfigRepository.findByOrganisationId(organisation.getId());
+        config.setMetabaseSyncStatus(status);
+        organisationConfigRepository.save(config);
+    }
+
+    public void removeVoidedAddressLevelTypeFromCustomRegistrationLocations(Organisation organisation, String voidedAddressLevelTypeUuid) {
+        OrganisationConfig organisationConfig = organisationConfigRepository.findByOrganisationId(organisation.getId());
+        String settingsKeyName = KeyType.customRegistrationLocations.toString();
+
+        // Get the current custom registration location settings
+        List<SubjectTypeSetting> customRegistrationLocations = organisationConfig.getCustomRegistrationLocations();
+
+        // For each subject type setting, remove the voided address level type from locationTypeUUIDs
+        List<SubjectTypeSetting> updatedSettings = new ArrayList<>();
+        boolean configChanged = false;
+
+        for (SubjectTypeSetting setting : customRegistrationLocations) {
+            List<String> locationTypeUUIDs = setting.getLocationTypeUUIDs();
+            if (locationTypeUUIDs != null && locationTypeUUIDs.contains(voidedAddressLevelTypeUuid)) {
+                // Remove the voided type from the list
+                locationTypeUUIDs.remove(voidedAddressLevelTypeUuid);
+                configChanged = true;
+            }
+
+            // Only add settings that still have at least one location type
+            if (locationTypeUUIDs != null && !locationTypeUUIDs.isEmpty()) {
+                updatedSettings.add(setting);
+            } else {
+                configChanged = true; // Setting removed completely
+            }
+        }
+
+        // Update the config if changes were made
+        if (configChanged) {
+            organisationConfig.getSettings().put(settingsKeyName, updatedSettings);
+            organisationConfigRepository.save(organisationConfig);
+        }
     }
 }

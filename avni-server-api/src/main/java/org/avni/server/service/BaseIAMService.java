@@ -6,12 +6,14 @@ import com.auth0.jwt.JWTVerifier;
 import com.auth0.jwt.algorithms.Algorithm;
 import com.auth0.jwt.exceptions.JWTDecodeException;
 import com.auth0.jwt.exceptions.JWTVerificationException;
+import com.auth0.jwt.exceptions.TokenExpiredException;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.auth0.jwt.interfaces.Verification;
 import com.google.common.base.Strings;
 import org.avni.server.dao.UserRepository;
 import org.avni.server.domain.User;
+import org.avni.server.domain.accessControl.AvniNoUserSessionException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.StringUtils;
@@ -36,7 +38,6 @@ public abstract class BaseIAMService implements IAMAuthService {
 
     @Override
     public User getUserFromToken(String token) throws SigningKeyNotFoundException {
-        logConfiguration();
         if (StringUtils.isEmpty(token)) return null;
 
         DecodedJWT jwt = verifyAndDecodeToken(token);
@@ -64,6 +65,10 @@ public abstract class BaseIAMService implements IAMAuthService {
             logger.error("Could not get public key for key specified in jwt token " + token, e);
             throw new RuntimeException(e);
         }
+        catch (JWTDecodeException e) {
+            logger.error("Could not decode token " + token, e);
+            throw new AvniNoUserSessionException(e);
+        }
 
         try {
             RSAPublicKey publicKey = (RSAPublicKey) jwk.getPublicKey();
@@ -74,7 +79,7 @@ public abstract class BaseIAMService implements IAMAuthService {
                     .acceptLeeway(240);
             addClaim(verification);
             JWTVerifier verifier = verification.build();
-            logger.debug(String.format("Verifying token for issuer: %s, token_use: id and audience: %s", this.getIssuer(), getAudience()));
+            logger.trace(String.format("Verifying token for issuer: %s, token_use: id and audience: %s", this.getIssuer(), getAudience()));
             return verifier.verify(token);
 
         } catch (InvalidPublicKeyException e) {
@@ -82,7 +87,10 @@ public abstract class BaseIAMService implements IAMAuthService {
             throw new RuntimeException(e);
         } catch (JWTDecodeException e) {
             logger.error("Could not decode token " + token, e);
-            throw new RuntimeException(e);
+            throw new AvniNoUserSessionException(e);
+        } catch (TokenExpiredException tokenExpiredException) {
+            logger.error("Token expired: " + token);
+            throw tokenExpiredException;
         } catch (JWTVerificationException e) {
             logger.error("Could not verify token " + token, e);
             throw new RuntimeException(e);

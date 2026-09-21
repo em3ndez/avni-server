@@ -9,16 +9,14 @@ import java.util.List;
 
 @Component
 public class SubjectCreator {
-
-    private IndividualRepository individualRepository;
-
+    private final IndividualRepository individualRepository;
 
     @Autowired
     public SubjectCreator(IndividualRepository individualRepository) {
         this.individualRepository = individualRepository;
     }
 
-    public Individual getSubject(String subjectId, List<String> errorMsgs, String identifierForErrorMessage) {
+    public Individual getSubject(String subjectId, String identifierForErrorMessage, List<String> errorMsgs) {
         if (subjectId == null || subjectId.isEmpty()) {
             errorMsgs.add(String.format("'%s' is required", identifierForErrorMessage));
             return null;

@@ -3,12 +3,11 @@ package org.avni.server.service;
 import org.avni.server.dao.NewsRepository;
 import org.avni.server.domain.CHSEntity;
 import org.avni.server.domain.News;
+import org.avni.server.domain.util.EntityUtil;
 import org.avni.server.util.BadRequestError;
-import org.avni.server.util.ReactAdminUtil;
 import org.avni.server.web.request.NewsContract;
-import org.springframework.stereotype.Service;
-
 import org.joda.time.DateTime;
+import org.springframework.stereotype.Service;
 
 @Service
 public class NewsService implements NonScopeAwareService {
@@ -44,7 +43,7 @@ public class NewsService implements NonScopeAwareService {
 
     public void deleteNews(News news) {
         news.setVoided(true);
-        news.setTitle(ReactAdminUtil.getVoidedName(news.getTitle(), news.getId()));
+        news.setTitle(EntityUtil.getVoidedName(news.getTitle(), news.getId()));
         newsRepository.save(news);
     }
 

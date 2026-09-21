@@ -1,13 +1,16 @@
 package org.avni.server.web;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.application.Platform;
 import org.avni.server.dao.*;
 import org.avni.server.dao.application.FormElementGroupRepository;
 import org.avni.server.dao.application.FormElementRepository;
 import org.avni.server.dao.application.FormRepository;
-import org.avni.server.domain.*;
 import org.avni.server.domain.Locale;
+import org.avni.server.domain.*;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.web.request.TranslationContract;
 import org.avni.server.web.request.TranslationRequest;
 import org.slf4j.Logger;
@@ -16,13 +19,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.rest.webmvc.RepositoryRestController;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
 
-import javax.transaction.Transactional;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -49,8 +50,10 @@ public class TranslationController implements RestControllerResourceProcessor<Tr
     private final OperationalSubjectTypeRepository operationalSubjectTypeRepository;
     private final CardRepository cardRepository;
     private final DashboardRepository dashboardRepository;
+    private final CustomCardConfigRepository customCardConfigRepository;
     private final String REGISTRATION_PREFIX = "REG_DISPLAY-";
     private final String ENROLMENT_PREFIX = "REG_ENROL_DISPLAY-";
+    private final AccessControlService accessControlService;
 
     @Autowired
     TranslationController(TranslationRepository translationRepository,
@@ -71,7 +74,9 @@ public class TranslationController implements RestControllerResourceProcessor<Tr
                           AddressLevelTypeRepository addressLevelTypeRepository,
                           OperationalSubjectTypeRepository operationalSubjectTypeRepository,
                           CardRepository cardRepository,
-                          DashboardRepository dashboardRepository) {
+                          DashboardRepository dashboardRepository,
+                          CustomCardConfigRepository customCardConfigRepository,
+                          AccessControlService accessControlService) {
         this.translationRepository = translationRepository;
         this.formElementGroupRepository = formElementGroupRepository;
         this.formElementRepository = formElementRepository;
@@ -91,13 +96,15 @@ public class TranslationController implements RestControllerResourceProcessor<Tr
         this.operationalSubjectTypeRepository = operationalSubjectTypeRepository;
         this.cardRepository = cardRepository;
         this.dashboardRepository = dashboardRepository;
+        this.customCardConfigRepository = customCardConfigRepository;
+        this.accessControlService = accessControlService;
         logger = LoggerFactory.getLogger(this.getClass());
     }
 
     @RequestMapping(value = "/translation", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
     public ResponseEntity<?> uploadTranslations(@RequestBody TranslationRequest request) {
+        accessControlService.checkPrivilege(PrivilegeType.EditOrganisationConfiguration);
         Locale language = Locale.valueOf(request.getLanguage());
         Translation translation = translationRepository.findByLanguage(language);
         if (translation == null) {
@@ -113,29 +120,43 @@ public class TranslationController implements RestControllerResourceProcessor<Tr
     }
 
     @RequestMapping(value = "/translation", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
-    public ResponseEntity<?> downloadTranslations(@RequestParam(value = "platform") String platform,
-                                                  @RequestParam(value = "emptyValue", defaultValue = "") String valueForEmptyKey) {
+    @Transactional(readOnly = true)
+    public ResponseEntity<?> downloadTranslations(
+            @RequestParam(value = "platform") String platform,
+            @RequestParam(value = "emptyValue", defaultValue = "") String valueForEmptyKey,
+            @RequestParam(value = "includeLocations", defaultValue = "true") boolean includeLocations) {
+
         Organisation organisation = UserContextHolder.getUserContext().getOrganisation();
         OrganisationConfig organisationConfig = organisationConfigRepository.findAll().stream().findFirst().orElse(null);
         if (organisationConfig == null) {
             return ResponseEntity.badRequest().body(String.format("Organisation configuration not set for %s. Unable to fetch data", organisation.getName()));
         }
         List<Translation> translations = translationRepository.findAll();
-        return ResponseEntity.ok().body(generateTranslations(organisationConfig, translations, Platform.valueOf(platform), valueForEmptyKey, organisation));
+        return ResponseEntity.ok().body(generateTranslations(organisationConfig, translations, Platform.valueOf(platform), valueForEmptyKey, organisation, includeLocations));
     }
 
-    private List<TranslationContract> generateTranslations(OrganisationConfig organisationConfig, List<Translation> translations, Platform platform, String valueForEmptyKey, Organisation organisation) {
+    private List<TranslationContract> generateTranslations(
+            OrganisationConfig organisationConfig, List<Translation> translations,
+            Platform platform, String valueForEmptyKey, Organisation organisation,
+            boolean includeLocations) {
+
         List<TranslationContract> translationList = new ArrayList<>();
-        Map<Locale, JsonObject> translationMap = translations.stream().collect(Collectors.toMap(Translation::getLanguage, Translation::getTranslationJson, (a, b) -> b));
+        Map<Locale, JsonObject> translationMap = translations.stream()
+                .collect(Collectors.toMap(Translation::getLanguage, Translation::getTranslationJson, (a, b) -> b));
+
+        Map<String, String> customCardDefaults = collectCustomCardTranslationDefaults();
+        Map<String, String> shareRuleDefaults = collectShareRuleTranslationDefaults();
+
         ((List<String>) organisationConfig.getSettings().get("languages"))
                 .forEach(language -> {
                     JsonObject existingTranslations = translationMap.get(Locale.valueOf(language));
                     Map<String, Object> platformTranslations = generatePlatformTranslations(platform, Locale.valueOf(language), valueForEmptyKey);
                     TranslationContract translation = new TranslationContract();
-                    JsonObject jsonObject = new JsonObject(generateTranslationsWithValue(valueForEmptyKey));
+                    JsonObject jsonObject = new JsonObject(generateTranslationsWithValue(valueForEmptyKey, includeLocations));
                     jsonObject.putAll(addRegistrationAndEnrolmentStrings());
                     jsonObject.putAll(platformTranslations);
+                    jsonObject.putAll(customCardTranslationsFor(customCardDefaults, Locale.valueOf(language), valueForEmptyKey));
+                    jsonObject.putAll(customCardTranslationsFor(shareRuleDefaults, Locale.valueOf(language), valueForEmptyKey));
                     jsonObject.putAll(existingTranslations != null ? existingTranslations : Collections.emptyMap());
                     translation.setLanguage(Locale.valueOf(language));
                     translation.setTranslationJson(jsonObject);
@@ -145,30 +166,39 @@ public class TranslationController implements RestControllerResourceProcessor<Tr
         return translationList;
     }
 
-    private Map<String, Object> generateTranslationsWithValue(String valueForEmptyKey) {
+    private Map<String, Object> generateTranslationsWithValue(String valueForEmptyKey, boolean includeLocations) {
         Map<String, Object> result = new HashMap<>();
-        Arrays.asList(formElementGroupRepository.getAllNames(),
-                formElementRepository.getAllNames(),
-                conceptRepository.getAllNames(),
-                operationalEncounterTypeRepository.getAllNames(),
-                encounterTypeRepository.getAllNames(),
-                operationalProgramRepository.getAllNames(),
-                programRepository.getAllNames(),
-                checklistDetailRepository.getAllNames(),
-                catchmentRepository.getAllNames(),
-                locationRepository.getAllNames(),
-                conceptAnswerRepository.getAllConceptNames(),
-                conceptAnswerRepository.getAllNames(),
-                formRepository.getAllNames(),
-                addressLevelTypeRepository.getAllNames(),
-                operationalSubjectTypeRepository.getAllNames(),
-                cardRepository.getAllNames(),
-                dashboardRepository.getAllNames()
-        ).forEach(list -> list.forEach(e -> {
-            if (e != null) {
-                result.put(e, valueForEmptyKey);
+
+        List<List<String>> sources = new ArrayList<>();
+
+        sources.add(formElementGroupRepository.getAllNames());
+        sources.add(formElementRepository.getAllNames());
+        sources.add(conceptRepository.getAllNames());
+        sources.add(operationalEncounterTypeRepository.getAllNames());
+        sources.add(encounterTypeRepository.getAllNames());
+        sources.add(operationalProgramRepository.getAllNames());
+        sources.add(programRepository.getAllNames());
+        sources.add(checklistDetailRepository.getAllNames());
+        sources.add(catchmentRepository.getAllNames());
+        sources.add(formRepository.getAllNames());
+        sources.add(addressLevelTypeRepository.getAllNames());
+        sources.add(operationalSubjectTypeRepository.getAllNames());
+        sources.add(cardRepository.getAllNames());
+        sources.add(dashboardRepository.getAllNames());
+
+        if (includeLocations) {
+            sources.add(locationRepository.getAllNames());
+        }
+
+        for (List<String> list : sources) {
+            if (list != null) {
+                for (String e : list) {
+                    if (e != null) {
+                        result.put(e, valueForEmptyKey);
+                    }
+                }
             }
-        }));
+        }
         return result;
     }
 
@@ -188,6 +218,50 @@ public class TranslationController implements RestControllerResourceProcessor<Tr
         JsonObject jsonObject = new JsonObject(emptyEnglishTranslation);
         jsonObject.putAll(platformTranslation.getTranslationJson());
         return jsonObject;
+    }
+
+    private Map<String, String> collectCustomCardTranslationDefaults() {
+        Map<String, String> result = new HashMap<>();
+        customCardConfigRepository.findAllByIsVoidedFalseOrderByName().forEach(config -> {
+            JsonObject translations = config.getTranslations();
+            if (translations == null) {
+                return;
+            }
+            translations.forEach((key, defaultValue) -> {
+                if (key != null) {
+                    result.put(key, defaultValue == null ? "" : defaultValue.toString());
+                }
+            });
+        });
+        return result;
+    }
+
+    private Map<String, String> collectShareRuleTranslationDefaults() {
+        Map<String, String> result = new HashMap<>();
+        formRepository.findAllByIsVoidedFalse().forEach(form -> {
+            JsonObject translations = form.getShareTranslations();
+            if (translations == null) {
+                return;
+            }
+            translations.forEach((key, defaultValue) -> {
+                if (key != null) {
+                    result.put(key, defaultValue == null ? "" : defaultValue.toString());
+                }
+            });
+        });
+        return result;
+    }
+
+    private Map<String, String> customCardTranslationsFor(Map<String, String> defaults, Locale language, String valueForEmptyKey) {
+        if (defaults.isEmpty()) {
+            return Collections.emptyMap();
+        }
+        if (Locale.en.equals(language)) {
+            return defaults;
+        }
+        Map<String, String> result = new HashMap<>(defaults.size());
+        defaults.keySet().forEach(key -> result.put(key, valueForEmptyKey));
+        return result;
     }
 
     private Map<String, String> addRegistrationAndEnrolmentStrings() {

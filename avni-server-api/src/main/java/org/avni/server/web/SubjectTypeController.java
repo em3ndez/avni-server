@@ -1,40 +1,41 @@
 package org.avni.server.web;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.application.FormMapping;
 import org.avni.server.application.FormType;
-import org.avni.server.application.KeyType;
 import org.avni.server.application.Subject;
 import org.avni.server.dao.GroupRoleRepository;
 import org.avni.server.dao.OperationalSubjectTypeRepository;
 import org.avni.server.dao.SubjectTypeRepository;
+import org.avni.server.dao.attendance.AttendanceTypeRepository;
+import org.avni.server.domain.JsonObject;
+import org.avni.server.domain.attendance.AttendanceType;
+import org.avni.server.service.attendance.AttendanceTypeService;
+import org.avni.server.web.request.attendance.AttendanceTypeContract;
 import org.avni.server.domain.GroupRole;
 import org.avni.server.domain.OperationalSubjectType;
+import org.avni.server.domain.OrganisationConfig;
 import org.avni.server.domain.SubjectType;
-import org.avni.server.domain.UserContext;
-import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.domain.accessControl.PrivilegeType;
+import org.avni.server.domain.util.EntityUtil;
 import org.avni.server.service.*;
 import org.avni.server.service.accessControl.AccessControlService;
+import org.avni.server.util.ReactAdminUtil;
 import org.avni.server.web.request.GroupRoleContract;
 import org.avni.server.web.request.SubjectTypeContract;
 import org.avni.server.web.request.syncAttribute.UserSyncAttributeAssignmentRequest;
 import org.avni.server.web.request.webapp.SubjectTypeContractWeb;
-import org.avni.server.web.request.webapp.SubjectTypeSetting;
-import org.avni.server.util.ObjectMapperSingleton;
-import org.avni.server.util.ReactAdminUtil;
+import org.avni.server.domain.SubjectTypeSetting;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Pageable;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -52,7 +53,8 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
     private final FormMappingService formMappingService;
     private final OrganisationConfigService organisationConfigService;
     private final AccessControlService accessControlService;
-    private final ObjectMapper objectMapper;
+    private final AttendanceTypeRepository attendanceTypeRepository;
+    private final AttendanceTypeService attendanceTypeService;
 
     @Autowired
     public SubjectTypeController(SubjectTypeRepository subjectTypeRepository,
@@ -61,7 +63,9 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
                                  GroupRoleRepository groupRoleRepository,
                                  ResetSyncService resetSyncService, FormService formService, FormMappingService formMappingService,
                                  OrganisationConfigService organisationConfigService,
-                                 AccessControlService accessControlService) {
+                                 AccessControlService accessControlService,
+                                 AttendanceTypeRepository attendanceTypeRepository,
+                                 AttendanceTypeService attendanceTypeService) {
         this.subjectTypeRepository = subjectTypeRepository;
         this.operationalSubjectTypeRepository = operationalSubjectTypeRepository;
         this.subjectTypeService = subjectTypeService;
@@ -71,31 +75,39 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
         this.formMappingService = formMappingService;
         this.organisationConfigService = organisationConfigService;
         this.accessControlService = accessControlService;
-        objectMapper = ObjectMapperSingleton.getObjectMapper();
+        this.attendanceTypeRepository = attendanceTypeRepository;
+        this.attendanceTypeService = attendanceTypeService;
         logger = LoggerFactory.getLogger(this.getClass());
     }
 
     @RequestMapping(value = "/subjectTypes", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
     public void save(@RequestBody List<SubjectTypeContract> subjectTypeRequests) {
-        subjectTypeRequests.forEach(subjectTypeService::saveSubjectType);
+        accessControlService.checkPrivilege(PrivilegeType.EditSubjectType);
+        subjectTypeRequests.forEach(subjectTypeContract -> {
+            SubjectTypeService.SubjectTypeUpsertResponse response = subjectTypeService.saveSubjectType(subjectTypeContract);
+            if(response.isSubjectTypeNotPresentInDB() && Subject.valueOf(subjectTypeContract.getType()).equals(Subject.User)) {
+                subjectTypeService.launchUserSubjectTypeJob(response.getSubjectType());
+            }
+        });
     }
 
     @GetMapping(value = "/web/subjectType")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
-    public PagedResources<Resource<SubjectTypeContractWeb>> getAll(Pageable pageable) {
+    public CollectionModel<EntityModel<SubjectTypeContractWeb>> getAll(Pageable pageable) {
         return wrap(operationalSubjectTypeRepository
                 .findPageByIsVoidedFalse(pageable)
                 .map((OperationalSubjectType operationalSubjectType) -> {
                     FormMapping formMapping = formMappingService.find(operationalSubjectType.getSubjectType());
-                    return SubjectTypeContractWeb.fromOperationalSubjectType(operationalSubjectType, formMapping);
+                    SubjectTypeContractWeb contract = SubjectTypeContractWeb.fromOperationalSubjectType(operationalSubjectType, formMapping);
+                    populateAttendanceTypes(contract, operationalSubjectType.getSubjectType());
+                    return contract;
                 }));
     }
 
     @GetMapping(value = "/web/subjectType/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public ResponseEntity getOne(@PathVariable("id") Long id) {
         OperationalSubjectType operationalSubjectType = operationalSubjectTypeRepository.findOne(id);
@@ -103,7 +115,9 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
             return ResponseEntity.notFound().build();
         FormMapping formMapping = formMappingService.find(operationalSubjectType.getSubjectType());
         SubjectTypeContractWeb subjectTypeContractWeb = SubjectTypeContractWeb.fromOperationalSubjectType(operationalSubjectType, formMapping);
-        List<SubjectTypeSetting> customRegistrationLocations = objectMapper.convertValue(organisationConfigService.getSettingsByKey(KeyType.customRegistrationLocations.toString()), new TypeReference<List<SubjectTypeSetting>>() {});
+        populateAttendanceTypes(subjectTypeContractWeb, operationalSubjectType.getSubjectType());
+        OrganisationConfig organisationConfig = organisationConfigService.getCurrentOrganisationConfig();
+        List<SubjectTypeSetting> customRegistrationLocations = organisationConfig.getCustomRegistrationLocations();
         Optional<List<String>> locationUUIDs = customRegistrationLocations
                 .stream()
                 .filter(s -> s.getSubjectTypeUUID().equals(operationalSubjectType.getSubjectTypeUUID()))
@@ -114,9 +128,9 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
     }
 
     @PostMapping(value = "/web/subjectType")
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     @Transactional
-    ResponseEntity saveSubjectTypeForWeb(@RequestBody SubjectTypeContractWeb request) {
+    public ResponseEntity saveSubjectTypeForWeb(@RequestBody SubjectTypeContractWeb request) {
+        accessControlService.checkPrivilege(PrivilegeType.EditSubjectType);
         SubjectType existingSubjectType =
                 subjectTypeRepository.findByNameIgnoreCase(request.getName());
         OperationalSubjectType existingOperationalSubjectType =
@@ -125,31 +139,42 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
             return ResponseEntity.badRequest().body(
                     ReactAdminUtil.generateJsonError(String.format("SubjectType %s already exists", request.getName()))
             );
-        if(request.getType() == null){
+        if (request.getType() == null) {
             return ResponseEntity.badRequest().body(
                     ReactAdminUtil.generateJsonError("Can't save subjectType with empty type")
             );
         }
+        boolean requestedIsGroup = Subject.Group.toString().equals(request.getType()) || Subject.Household.toString().equals(request.getType());
+        boolean requestedIsHousehold = Subject.Household.toString().equals(request.getType());
+        boolean requestedAttendanceEnabled = Boolean.TRUE.equals(request.isAttendanceEnabled());
+        subjectTypeService.validateAttendanceEligibilityAndConfig(requestedAttendanceEnabled, requestedIsGroup, requestedIsHousehold, request.getAttendanceTypes());
         SubjectType subjectType = new SubjectType();
-        subjectType.assignUUID();
+        subjectType.assignUUID(request.getUUID());
         buildSubjectType(request, subjectType);
+        applyInlineAttendanceTypes(subjectType, request.getAttendanceTypes());
+        subjectTypeService.seedDefaultAttendanceTypeIfEnabling(subjectType, false);
         OperationalSubjectType operationalSubjectType = new OperationalSubjectType();
         operationalSubjectType.assignUUID();
         operationalSubjectType.setName(request.getName());
         operationalSubjectType.setSubjectType(subjectType);
         operationalSubjectTypeRepository.save(operationalSubjectType);
 
-        formMappingService.saveFormMapping(
-                new FormMappingParameterObject(subjectType.getUuid(), null, null),
-                new FormMappingParameterObject(subjectType.getUuid(), null, null),
-                formService.getOrCreateForm(request.getRegistrationFormUuid(),
-                        String.format("%s Registration", subjectType.getName()),
-                        FormType.IndividualProfile), request.isEnableRegistrationApproval());
+        if (!subjectType.getType().equals(Subject.User)) {
+            formMappingService.saveFormMapping(
+                    new FormMappingParameterObject(subjectType.getUuid(), null, null),
+                    formService.getOrCreateForm(request.getRegistrationFormUuid(),
+                            String.format("%s Registration", subjectType.getName()),
+                            FormType.IndividualProfile), request.isEnableRegistrationApproval());
+        }
 
-        organisationConfigService.saveCustomRegistrationLocations(request.getLocationTypeUUIDs(), subjectType);
+        organisationConfigService.saveRegistrationLocations(request.getLocationTypeUUIDs(), subjectType);
         FormMapping formMapping = formMappingService.find(subjectType);
         SubjectTypeContractWeb subjectTypeContractWeb = SubjectTypeContractWeb.fromOperationalSubjectType(operationalSubjectType, formMapping);
         subjectTypeContractWeb.setLocationTypeUUIDs(request.getLocationTypeUUIDs());
+        populateAttendanceTypes(subjectTypeContractWeb, subjectType);
+
+        if (subjectType.getType().equals(Subject.User))
+            subjectTypeService.launchUserSubjectTypeJob(subjectType);
         return ResponseEntity.ok(subjectTypeContractWeb);
     }
 
@@ -162,6 +187,7 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
         subjectType.setType(Subject.valueOf(request.getType()));
         subjectType.setSubjectSummaryRule(request.getSubjectSummaryRule());
         subjectType.setProgramEligibilityCheckRule(request.getProgramEligibilityCheckRule());
+        subjectType.setMemberAdditionEligibilityCheckRule(request.getMemberAdditionEligibilityCheckRule());
         subjectType.setAllowMiddleName(request.isAllowMiddleName());
         subjectType.setValidFirstNameFormat(request.getValidFirstNameFormat());
         subjectType.setValidMiddleNameFormat(request.getValidMiddleNameFormat());
@@ -173,6 +199,11 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
         subjectType.setSyncRegistrationConcept1(request.getSyncRegistrationConcept1());
         subjectType.setSyncRegistrationConcept2(request.getSyncRegistrationConcept2());
         subjectType.setNameHelpText(request.getNameHelpText());
+        subjectTypeService.validateRemovalReasonConceptSetting(request.getSettings());
+        subjectType.setSettings(request.getSettings() != null ? request.getSettings() : subjectTypeService.getDefaultSettings());
+        if (request.isAttendanceEnabled() != null) {
+            subjectType.setAttendanceEnabled(request.isAttendanceEnabled());
+        }
         SubjectType savedSubjectType = subjectTypeRepository.save(subjectType);
         if (Subject.Household.toString().equals(request.getType())) {
             subjectType.setGroup(true);
@@ -186,9 +217,10 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
     }
 
     @PutMapping(value = "/web/subjectType/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
+    @Transactional
     public ResponseEntity updateSubjectTypeForWeb(@RequestBody SubjectTypeContractWeb request,
                                                   @PathVariable("id") Long id) {
+        accessControlService.checkPrivilege(PrivilegeType.EditSubjectType);
         logger.info(String.format("Processing Subject Type update request: %s", request.toString()));
         if (request.getName().trim().equals(""))
             return ResponseEntity.badRequest().body(ReactAdminUtil.generateJsonError("Name can not be empty"));
@@ -198,19 +230,36 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
         if (operationalSubjectType == null)
             return ResponseEntity.badRequest()
                     .body(ReactAdminUtil.generateJsonError(String.format("Subject Type with id '%d' not found", id)));
+        if (request.getType() == null) {
+            return ResponseEntity.badRequest().body(
+                    ReactAdminUtil.generateJsonError("Can't save subjectType with empty type")
+            );
+        }
         SubjectType subjectType = operationalSubjectType.getSubjectType();
+        boolean wasAttendanceEnabled = subjectType.isAttendanceEnabled();
+        boolean requestedIsGroup = Subject.Group.toString().equals(request.getType()) || Subject.Household.toString().equals(request.getType());
+        boolean requestedIsHousehold = Subject.Household.toString().equals(request.getType());
+        boolean requestedAttendanceEnabled = request.isAttendanceEnabled() == null ? wasAttendanceEnabled : request.isAttendanceEnabled();
+        subjectTypeService.validateAttendanceEligibilityAndConfig(requestedAttendanceEnabled, requestedIsGroup, requestedIsHousehold, request.getAttendanceTypes());
         boolean isSyncConcept1Changed = !Objects.equals(request.getSyncRegistrationConcept1(), subjectType.getSyncRegistrationConcept1());
         boolean isSyncConcept2Changed = !Objects.equals(request.getSyncRegistrationConcept2(), subjectType.getSyncRegistrationConcept2());
-            if (isSyncConcept1Changed)
-                subjectType.setSyncRegistrationConcept1Usable(false);
-            if (isSyncConcept2Changed)
-                subjectType.setSyncRegistrationConcept2Usable(false);
+        if (isSyncConcept1Changed)
+            subjectType.setSyncRegistrationConcept1Usable(false);
+        if (isSyncConcept2Changed)
+            subjectType.setSyncRegistrationConcept2Usable(false);
         resetSyncService.recordSyncAttributeChange(operationalSubjectType.getSubjectType(), request);
         updateSubjectType(request, operationalSubjectType);
+        applyInlineAttendanceTypes(subjectType, request.getAttendanceTypes());
+        subjectTypeService.seedDefaultAttendanceTypeIfEnabling(subjectType, wasAttendanceEnabled);
         subjectTypeService.updateSyncAttributesIfRequired(subjectType);
         FormMapping formMapping = formMappingService.find(subjectType);
         SubjectTypeContractWeb subjectTypeContractWeb = SubjectTypeContractWeb.fromOperationalSubjectType(operationalSubjectType, formMapping);
         subjectTypeContractWeb.setLocationTypeUUIDs(request.getLocationTypeUUIDs());
+        populateAttendanceTypes(subjectTypeContractWeb, subjectType);
+
+        if (subjectType.getType().equals(Subject.User) && !subjectType.isVoided())
+            subjectTypeService.launchUserSubjectTypeJob(subjectType);
+
         return ResponseEntity.ok(subjectTypeContractWeb);
     }
 
@@ -222,19 +271,19 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
         operationalSubjectType.setName(request.getName());
         operationalSubjectTypeRepository.save(operationalSubjectType);
 
-        formMappingService.saveFormMapping(
-                new FormMappingParameterObject(subjectType.getUuid(), null, null),
-                new FormMappingParameterObject(subjectType.getUuid(), null, null),
-                formService.getOrCreateForm(request.getRegistrationFormUuid(),
-                        String.format("%s Registration", subjectType.getName()), FormType.IndividualProfile), request.isEnableRegistrationApproval());
-
-        organisationConfigService.saveCustomRegistrationLocations(request.getLocationTypeUUIDs(), subjectType);
+        if (!subjectType.getType().equals(Subject.User)) {
+            formMappingService.saveFormMapping(
+                    new FormMappingParameterObject(subjectType.getUuid(), null, null),
+                    formService.getOrCreateForm(request.getRegistrationFormUuid(),
+                            String.format("%s Registration", subjectType.getName()), FormType.IndividualProfile), request.isEnableRegistrationApproval());
+        }
+        organisationConfigService.saveRegistrationLocations(request.getLocationTypeUUIDs(), subjectType);
     }
 
     @DeleteMapping(value = "/web/subjectType/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @Transactional
     public ResponseEntity voidSubjectType(@PathVariable("id") Long id) {
+        accessControlService.checkPrivilege(PrivilegeType.EditSubjectType);
         OperationalSubjectType operationalSubjectType = operationalSubjectTypeRepository.findOne(id);
         if (operationalSubjectType == null)
             return ResponseEntity.notFound().build();
@@ -242,9 +291,9 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
         if (subjectType == null)
             return ResponseEntity.notFound().build();
 
-        operationalSubjectType.setName(ReactAdminUtil.getVoidedName(operationalSubjectType.getName(), operationalSubjectType.getId()));
+        operationalSubjectType.setName(EntityUtil.getVoidedName(operationalSubjectType.getName(), operationalSubjectType.getId()));
         operationalSubjectType.setVoided(true);
-        subjectType.setName(ReactAdminUtil.getVoidedName(subjectType.getName(), subjectType.getId()));
+        subjectType.setName(EntityUtil.getVoidedName(subjectType.getName(), subjectType.getId()));
         subjectType.setVoided(true);
         operationalSubjectTypeRepository.save(operationalSubjectType);
         subjectTypeRepository.save(subjectType);
@@ -258,9 +307,9 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
     }
 
     @GetMapping(value = "/subjectType/syncAttributesData")
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
+    @Transactional(readOnly = true)
     public UserSyncAttributeAssignmentRequest getAllConceptSyncAttributes() {
-       return subjectTypeService.getSyncAttributeData();
+        return subjectTypeService.getSyncAttributeData();
     }
 
     private void voidAllGroupRoles(SubjectType subjectType) {
@@ -290,5 +339,32 @@ public class SubjectTypeController implements RestControllerResourceProcessor<Su
         groupRole.setMinimumNumberOfMembers(groupRoleContract.getMinimumNumberOfMembers());
         groupRole.setMaximumNumberOfMembers(groupRoleContract.getMaximumNumberOfMembers());
         return groupRole;
+    }
+
+    private void populateAttendanceTypes(SubjectTypeContractWeb contract, SubjectType subjectType) {
+        List<AttendanceType> attendanceTypes = attendanceTypeRepository.findBySubjectTypeAndIsVoidedFalse(subjectType);
+        contract.setAttendanceTypes(attendanceTypes.stream()
+                .map(AttendanceTypeContract::fromEntity)
+                .collect(Collectors.toList()));
+    }
+
+    private void applyInlineAttendanceTypes(SubjectType subjectType, List<AttendanceTypeContract> contracts) {
+        if (contracts == null) return;
+        for (AttendanceTypeContract contract : contracts) {
+            AttendanceType attendanceType = contract.getUuid() != null
+                    ? attendanceTypeRepository.findByUuid(contract.getUuid())
+                    : null;
+            if (attendanceType == null) {
+                attendanceType = new AttendanceType();
+                contract.setupUuidIfNeeded();
+                attendanceType.assignUUID(contract.getUuid());
+            }
+            attendanceType.setSubjectType(subjectType);
+            attendanceType.setName(contract.getName());
+            attendanceType.setSortOrder(contract.getSortOrder());
+            attendanceType.setConfig(contract.getConfig() == null ? new JsonObject() : new JsonObject(contract.getConfig()));
+            attendanceType.setVoided(contract.isVoided());
+            attendanceTypeService.save(attendanceType);
+        }
     }
 }

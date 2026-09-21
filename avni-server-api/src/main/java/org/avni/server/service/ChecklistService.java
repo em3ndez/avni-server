@@ -1,25 +1,30 @@
 package org.avni.server.service;
 
 
-import org.avni.server.dao.*;
-import org.avni.server.domain.*;
+import org.avni.server.dao.ChecklistDetailRepository;
+import org.avni.server.dao.ChecklistItemRepository;
+import org.avni.server.dao.ChecklistRepository;
+import org.avni.server.dao.OperatingIndividualScopeAwareRepository;
+import org.avni.server.domain.sync.SyncEntityName;
+import org.avni.server.domain.Checklist;
+import org.avni.server.domain.ChecklistDetail;
+import org.avni.server.domain.Individual;
+import org.avni.server.domain.User;
 import org.avni.server.framework.security.UserContextHolder;
 import org.joda.time.DateTime;
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import javax.transaction.Transactional;
 import java.util.Set;
 
 @Component
-public class ChecklistService implements ScopeAwareService {
-    private ChecklistRepository checklistRepository;
-    private ChecklistItemRepository checklistItemRepository;
+public class ChecklistService implements ScopeAwareService<Checklist> {
+    private final ChecklistRepository checklistRepository;
+    private final ChecklistItemRepository checklistItemRepository;
     private final ChecklistDetailRepository checklistDetailRepository;
 
     @Autowired
-    public ChecklistService(ChecklistRepository checklistRepository, ChecklistItemRepository checklistItemRepository, ProgramEnrolmentRepository programEnrolmentRepository, ChecklistDetailRepository checklistDetailRepository) {
+    public ChecklistService(ChecklistRepository checklistRepository, ChecklistItemRepository checklistItemRepository, ChecklistDetailRepository checklistDetailRepository) {
         this.checklistRepository = checklistRepository;
         this.checklistItemRepository = checklistItemRepository;
         this.checklistDetailRepository = checklistDetailRepository;
@@ -29,16 +34,6 @@ public class ChecklistService implements ScopeAwareService {
         return checklistRepository.findByProgramEnrolmentIndividual(individual);
     }
 
-    @Transactional(Transactional.TxType.REQUIRED)
-    public ChecklistItem findChecklistItem(String checklistUUID, String checklistItemDetailUUID) {
-        return checklistItemRepository.findByChecklistUuidAndChecklistItemDetailUuid(checklistUUID, checklistItemDetailUUID);
-    }
-
-    @Transactional(Transactional.TxType.REQUIRED)
-    public void saveItem(ChecklistItem checklistItem) {
-        checklistItemRepository.save(checklistItem);
-    }
-
     @Override
     public boolean isScopeEntityChanged(DateTime lastModifiedDateTime, String checklistDetailUuid) {
         ChecklistDetail checklistDetail = checklistDetailRepository.findByUuid(checklistDetailUuid);
@@ -46,11 +41,11 @@ public class ChecklistService implements ScopeAwareService {
         Checklist checklist = checklistRepository.findFirstByChecklistDetail(checklistDetail);
         return checklistDetail != null &&
                 checklist != null &&
-                isChangedBySubjectTypeRegistrationLocationType(user, lastModifiedDateTime, checklistDetail.getId(), checklist.getProgramEnrolment().getIndividual().getSubjectType(), SyncParameters.SyncEntityName.Checklist);
+                isChangedBySubjectTypeRegistrationLocationType(user, lastModifiedDateTime, checklistDetail.getId(), checklist.getProgramEnrolment().getIndividual().getSubjectType(), SyncEntityName.Checklist);
     }
 
     @Override
-    public OperatingIndividualScopeAwareRepository repository() {
+    public OperatingIndividualScopeAwareRepository<Checklist> repository() {
         return checklistRepository;
     }
 }

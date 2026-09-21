@@ -51,9 +51,8 @@ public class ExportFieldsManager implements ExportEntityTypeVisitor {
                     .stream()
                     .filter(uuidFormElementEntry -> providedFields.contains(uuidFormElementEntry.getKey()))
                     .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue, (x, y) -> y, LinkedHashMap::new));
-
         } else {
-            return allFormElementsAndDecisions;
+            return Collections.EMPTY_MAP;
         }
     }
 
@@ -73,7 +72,7 @@ public class ExportFieldsManager implements ExportEntityTypeVisitor {
     @Override
     public void visitEncounter(ExportEntityType encounter, ExportEntityType subjectExportEntityType) {
         addEncounterTypeForm(encounter, FormType.Encounter);
-        addEncounterTypeForm(encounter, FormType.IndividualEncounterCancellation);
+        addEncounterTypeForm(encounter, FormType.IndividualEncounterCancellation, true);
         processEncounter(encounter, subjectExportEntityType);
     }
 
@@ -102,32 +101,35 @@ public class ExportFieldsManager implements ExportEntityTypeVisitor {
     @Override
     public void visitGroupEncounter(ExportEntityType groupEncounter, ExportEntityType group) {
         addEncounterTypeForm(groupEncounter, FormType.Encounter);
-        addEncounterTypeForm(groupEncounter, FormType.IndividualEncounterCancellation);
+        addEncounterTypeForm(groupEncounter, FormType.IndividualEncounterCancellation, true);
         processEncounter(groupEncounter, group);
     }
 
     @Override
     public void visitProgram(ExportEntityType program, ExportEntityType subjectExportEntityType) {
-        addProgramForm(program, FormType.ProgramEnrolment);
-        addProgramForm(program, FormType.ProgramExit);
+        addProgramForm(program, FormType.ProgramEnrolment, false);
+        addProgramForm(program, FormType.ProgramExit, true);
 
         this.setCoreFields(HeaderCreator.getProgramEnrolmentCoreFields(), program);
         LinkedHashMap<String, FormElement> enrolmentElements = formMappingService.getAllFormElementsAndDecisionMap(subjectExportEntityType.getUuid(), program.getUuid(), null, FormType.ProgramEnrolment);
-        mainFormMap.put(program.getUuid(), enrolmentElements);
+        mainFormMap.put(program.getUuid(), this.getObsFields(program, enrolmentElements, HeaderCreator.getProgramEnrolmentCoreFields()));
+
 
         LinkedHashMap<String, FormElement> enrolmentExitElements = formMappingService.getAllFormElementsAndDecisionMap(subjectExportEntityType.getUuid(), program.getUuid(), null, FormType.ProgramExit);
-        secondaryFormMap.put(program.getUuid(), enrolmentExitElements);
+        secondaryFormMap.put(program.getUuid(), this.getObsFields(program, enrolmentExitElements, HeaderCreator.getProgramEnrolmentCoreFields()));
     }
 
-    private void addProgramForm(ExportEntityType program, FormType formType) {
+    private void addProgramForm(ExportEntityType program, FormType formType, boolean isOptional) {
         FormMapping formMapping = formMappingService.findForProgram(program.getUuid(), formType);
+        if (formMapping == null && isOptional) return;
+
         forms.put(formMapping.getForm(), program.getFilters());
     }
 
     @Override
     public void visitProgramEncounter(ExportEntityType encounterType, ExportEntityType program, ExportEntityType subject) {
         addEncounterTypeForm(encounterType, FormType.ProgramEncounter);
-        addEncounterTypeForm(encounterType, FormType.ProgramEncounterCancellation);
+        addEncounterTypeForm(encounterType, FormType.ProgramEncounterCancellation, true);
 
         this.setCoreFields(HeaderCreator.getEncounterCoreFields(), encounterType);
         LinkedHashMap<String, FormElement> encounterFormElements = formMappingService.getAllFormElementsAndDecisionMap(subject.getUuid(), program.getUuid(), encounterType.getUuid(), FormType.ProgramEncounter);
@@ -142,7 +144,12 @@ public class ExportFieldsManager implements ExportEntityTypeVisitor {
     }
 
     private void addEncounterTypeForm(ExportEntityType exportEntityType, FormType formType) {
+        this.addEncounterTypeForm(exportEntityType, formType, false);
+    }
+
+    private void addEncounterTypeForm(ExportEntityType exportEntityType, FormType formType, boolean isOptional) {
         FormMapping formMapping = formMappingService.findForEncounter(exportEntityType.getUuid(), formType);
+        if (isOptional && formMapping == null) return;
         forms.put(formMapping.getForm(), exportEntityType.getFilters());
     }
 

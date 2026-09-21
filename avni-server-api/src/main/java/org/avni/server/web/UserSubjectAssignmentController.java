@@ -2,18 +2,22 @@ package org.avni.server.web;
 
 import org.avni.server.dao.UserSubjectAssignmentRepository;
 import org.avni.server.domain.*;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.service.UserSubjectAssignmentService;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.web.request.UserSubjectAssignmentContract;
 import org.avni.server.web.request.webapp.search.SubjectSearchRequest;
 import org.avni.server.web.response.slice.SlicedResources;
 import org.joda.time.DateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Pageable;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.Link;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -22,22 +26,26 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.LinkedHashMap;
 
+import static org.avni.server.web.resourceProcessors.ResourceProcessor.addAuditFields;
+
 @RestController
 public class UserSubjectAssignmentController extends AbstractController<UserSubjectAssignment> implements RestControllerResourceProcessor<UserSubjectAssignment> {
-
+    private static final Logger logger = LoggerFactory.getLogger(UserSubjectAssignmentController.class);
     private final UserSubjectAssignmentRepository userSubjectAssignmentRepository;
     private final UserSubjectAssignmentService userSubjectAssignmentService;
+    private final AccessControlService accessControlService;
 
     @Autowired
-    public UserSubjectAssignmentController(UserSubjectAssignmentRepository userSubjectAssignmentRepository, UserSubjectAssignmentService userSubjectAssignmentService) {
+    public UserSubjectAssignmentController(UserSubjectAssignmentRepository userSubjectAssignmentRepository, UserSubjectAssignmentService userSubjectAssignmentService, AccessControlService accessControlService) {
         this.userSubjectAssignmentRepository = userSubjectAssignmentRepository;
         this.userSubjectAssignmentService = userSubjectAssignmentService;
+        this.accessControlService = accessControlService;
     }
 
     @RequestMapping(value = "/userSubjectAssignment", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    @Transactional
-    public PagedResources<Resource<UserSubjectAssignment>> getTasks(
+    @Transactional(readOnly = true)
+    public CollectionModel<EntityModel<UserSubjectAssignment>> getTasks(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
             @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
             Pageable pageable) {
@@ -47,8 +55,8 @@ public class UserSubjectAssignmentController extends AbstractController<UserSubj
 
     @RequestMapping(value = "/userSubjectAssignment/v2", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    @Transactional
-    public SlicedResources<Resource<UserSubjectAssignment>> getTasksAsSlice(
+    @Transactional(readOnly = true)
+    public SlicedResources<EntityModel<UserSubjectAssignment>> getTasksAsSlice(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
             @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
             Pageable pageable) {
@@ -58,8 +66,9 @@ public class UserSubjectAssignmentController extends AbstractController<UserSubj
 
 
     @RequestMapping(value = "/web/subjectAssignmentMetadata", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     public JsonObject getSubjectAssignmentMetadataForSearch() {
+        accessControlService.checkPrivilege(PrivilegeType.AssignSubject);
         return userSubjectAssignmentService.getUserSubjectAssignmentMetadata();
     }
 
@@ -70,19 +79,24 @@ public class UserSubjectAssignmentController extends AbstractController<UserSubj
     }
 
     @RequestMapping(value = "/web/userSubjectAssignment", method = RequestMethod.POST)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin', 'admin')")
     @Transactional
     ResponseEntity<?> save(@RequestBody UserSubjectAssignmentContract userSubjectAssignmentContract) {
-        Organisation organisation = UserContextHolder.getUserContext().getOrganisation();
-        userSubjectAssignmentService.save(userSubjectAssignmentContract, organisation);
-        return ResponseEntity.ok(userSubjectAssignmentContract);
+        try {
+            accessControlService.checkPrivilege(PrivilegeType.EditUserConfiguration);
+            userSubjectAssignmentService.assignSubjects(userSubjectAssignmentContract);
+            return ResponseEntity.ok(userSubjectAssignmentContract);
+        } catch (ValidationException validationException) {
+            logger.error("Failed to assign subject(s) to user", validationException);
+            return ResponseEntity.badRequest().body(validationException.getMessage());
+        }
     }
 
     @Override
-    public Resource<UserSubjectAssignment> process(Resource<UserSubjectAssignment> resource) {
+    public EntityModel<UserSubjectAssignment> process(EntityModel<UserSubjectAssignment> resource) {
         UserSubjectAssignment userSubjectAssignment = resource.getContent();
         resource.removeLinks();
-        resource.add(new Link(userSubjectAssignment.getSubject().getUuid(), "subjectUUID"));
+        resource.add(Link.of(userSubjectAssignment.getSubject().getUuid(), "subjectUUID"));
+        addAuditFields(userSubjectAssignment, resource);
         return resource;
     }
 }

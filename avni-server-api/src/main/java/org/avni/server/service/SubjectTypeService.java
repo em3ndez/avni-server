@@ -1,14 +1,29 @@
 package org.avni.server.service;
 
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 import org.avni.server.application.Subject;
+import org.avni.server.application.SubjectTypeSettingKey;
+import org.avni.server.common.BulkItemSaveException;
+import org.avni.server.dao.AddressLevelTypeRepository;
 import org.avni.server.dao.AvniJobRepository;
 import org.avni.server.dao.OperationalSubjectTypeRepository;
 import org.avni.server.dao.SubjectTypeRepository;
+import org.avni.server.dao.attendance.AttendanceTypeRepository;
 import org.avni.server.domain.*;
+import org.avni.server.domain.attendance.AttendanceType;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.attendance.AttendanceConfigIncompleteException;
+import org.avni.server.service.attendance.AttendanceTypeConfigKey;
+import org.avni.server.service.attendance.IncompleteAttendanceType;
+import org.avni.server.service.batch.BatchJobService;
+import org.avni.server.util.BadRequestError;
 import org.avni.server.web.request.OperationalSubjectTypeContract;
+import org.avni.server.web.request.OperationalSubjectTypesContract;
 import org.avni.server.web.request.SubjectTypeContract;
+import org.avni.server.web.request.attendance.AttendanceTypeContract;
 import org.avni.server.web.request.syncAttribute.UserSyncAttributeAssignmentRequest;
+import org.avni.server.domain.SubjectTypeSetting;
 import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,36 +45,74 @@ import java.util.stream.Stream;
 
 @Service
 public class SubjectTypeService implements NonScopeAwareService {
-
+    private static final String DEFAULT_ATTENDANCE_TYPE_NAME = "Attendance";
+    private static final int DEFAULT_ATTENDANCE_TYPE_SORT_ORDER = 1;
     private final Logger logger;
     private final OperationalSubjectTypeRepository operationalSubjectTypeRepository;
-    private SubjectTypeRepository subjectTypeRepository;
-    private Job syncAttributesJob;
-    private JobLauncher syncAttributesJobLauncher;
-    private AvniJobRepository avniJobRepository;
+    private final SubjectTypeRepository subjectTypeRepository;
+    private final Job syncAttributesJob;
+    private final JobLauncher syncAttributesJobLauncher;
+    private final AvniJobRepository avniJobRepository;
+    private final Job userSubjectTypeCreateJob;
+    private final JobLauncher userSubjectTypeCreateJobLauncher;
     private final ConceptService conceptService;
+    private final OrganisationConfigService organisationConfigService;
+    private final AddressLevelTypeRepository addressLevelTypeRepository;
+    private final UserService userService;
+    private final LocationHierarchyService locationHierarchyService;
+    private final BatchJobService batchJobService;
+    private final AttendanceTypeRepository attendanceTypeRepository;
 
     @Autowired
     public SubjectTypeService(SubjectTypeRepository subjectTypeRepository,
                               OperationalSubjectTypeRepository operationalSubjectTypeRepository,
                               Job syncAttributesJob,
                               JobLauncher syncAttributesJobLauncher,
+                              Job userSubjectTypeCreateJob,
+                              JobLauncher userSubjectTypeCreateJobLauncher,
                               AvniJobRepository avniJobRepository,
-                              ConceptService conceptService) {
+                              ConceptService conceptService, OrganisationConfigService organisationConfigService,
+                              AddressLevelTypeRepository addressLevelTypeRepository, UserService userService, LocationHierarchyService locationHierarchyService,
+                              BatchJobService batchJobService,
+                              AttendanceTypeRepository attendanceTypeRepository) {
         this.subjectTypeRepository = subjectTypeRepository;
         this.operationalSubjectTypeRepository = operationalSubjectTypeRepository;
         this.syncAttributesJob = syncAttributesJob;
         this.syncAttributesJobLauncher = syncAttributesJobLauncher;
+        this.userSubjectTypeCreateJob = userSubjectTypeCreateJob;
+        this.userSubjectTypeCreateJobLauncher = userSubjectTypeCreateJobLauncher;
         this.avniJobRepository = avniJobRepository;
         this.conceptService = conceptService;
+        this.organisationConfigService = organisationConfigService;
+        this.addressLevelTypeRepository = addressLevelTypeRepository;
+        this.locationHierarchyService = locationHierarchyService;
+        this.batchJobService = batchJobService;
+        this.attendanceTypeRepository = attendanceTypeRepository;
         logger = LoggerFactory.getLogger(this.getClass());
+        this.userService = userService;
     }
 
-    public void saveSubjectType(SubjectTypeContract subjectTypeRequest) {
+    public SubjectTypeUpsertResponse saveSubjectType(SubjectTypeContract subjectTypeRequest) {
+        return saveSubjectType(subjectTypeRequest, false, false);
+    }
+
+    public SubjectTypeUpsertResponse saveSubjectType(SubjectTypeContract subjectTypeRequest, boolean skipAttendanceSeed) {
+        return saveSubjectType(subjectTypeRequest, skipAttendanceSeed, false);
+    }
+
+    public SubjectTypeUpsertResponse saveSubjectType(SubjectTypeContract subjectTypeRequest, boolean skipAttendanceSeed, boolean skipSettingsValidation) {
         logger.info(String.format("Creating subjectType: %s", subjectTypeRequest.toString()));
         SubjectType subjectType = subjectTypeRepository.findByUuid(subjectTypeRequest.getUuid());
-        if (subjectType == null) {
+        boolean isSubjectTypeNotPresentInDB = (subjectType == null);
+        boolean wasAttendanceEnabled = subjectType != null && subjectType.isAttendanceEnabled();
+        if (isSubjectTypeNotPresentInDB) {
             subjectType = new SubjectType();
+        }
+        validateAttendanceEligibilityAndConfig(subjectTypeRequest, subjectType);
+        // During bundle import the referenced Concept may not have been processed yet (subjectTypes.json
+        // runs before concepts.json), so the strict UUID-resolves check would falsely fail every import.
+        if (!skipSettingsValidation) {
+            validateRemovalReasonConceptSetting(subjectTypeRequest.getSettings());
         }
         subjectType.setUuid(subjectTypeRequest.getUuid());
         subjectType.setVoided(subjectTypeRequest.isVoided());
@@ -76,6 +129,7 @@ public class SubjectTypeService implements NonScopeAwareService {
         subjectType.setType(Subject.valueOf(subjectTypeRequest.getType()));
         subjectType.setSubjectSummaryRule(subjectTypeRequest.getSubjectSummaryRule());
         subjectType.setProgramEligibilityCheckRule(subjectTypeRequest.getProgramEligibilityCheckRule());
+        subjectType.setMemberAdditionEligibilityCheckRule(subjectTypeRequest.getMemberAdditionEligibilityCheckRule());
         subjectType.setProgramEligibilityCheckDeclarativeRule(subjectTypeRequest.getProgramEligibilityCheckDeclarativeRule());
         subjectType.setIconFileS3Key(subjectTypeRequest.getIconFileS3Key());
         subjectType.setShouldSyncByLocation(subjectTypeRequest.isShouldSyncByLocation());
@@ -85,7 +139,88 @@ public class SubjectTypeService implements NonScopeAwareService {
         subjectType.setSyncRegistrationConcept2(subjectTypeRequest.getSyncRegistrationConcept2());
         subjectType.setSyncRegistrationConcept2Usable(subjectTypeRequest.getSyncRegistrationConcept2Usable());
         subjectType.setNameHelpText(subjectTypeRequest.getNameHelpText());
-        subjectTypeRepository.save(subjectType);
+        subjectType.setSettings(subjectTypeRequest.getSettings() != null ? subjectTypeRequest.getSettings() : getDefaultSettings());
+        subjectType.setAttendanceEnabled(subjectTypeRequest.isAttendanceEnabled());
+        subjectType = subjectTypeRepository.save(subjectType);
+        if (!skipAttendanceSeed) {
+            seedDefaultAttendanceTypeIfEnabling(subjectType, wasAttendanceEnabled);
+        }
+        return new SubjectTypeUpsertResponse(isSubjectTypeNotPresentInDB, subjectType);
+    }
+
+    private void validateAttendanceEligibilityAndConfig(SubjectTypeContract request, SubjectType existing) {
+        // SubjectTypeContract (non-web REST API path) carries no attendanceTypes; eligibility-only.
+        validateAttendanceEligibilityAndConfig(request.isAttendanceEnabled(), request.isGroup(), request.isHousehold(), null);
+    }
+
+    public void validateAttendanceEligibilityAndConfig(boolean requestedAttendanceEnabled,
+                                                       boolean requestedIsGroup,
+                                                       boolean requestedIsHousehold,
+                                                       List<AttendanceTypeContract> requestAttendanceTypes) {
+        if (!requestedAttendanceEnabled) {
+            return;
+        }
+        if (!(requestedIsGroup || requestedIsHousehold)) {
+            throw new BadRequestError("attendance_enabled requires a group or household subject type");
+        }
+        if (requestAttendanceTypes == null) {
+            return;
+        }
+        List<IncompleteAttendanceType> incomplete = new ArrayList<>();
+        // Validate voided rows too: partial config on a voided row can still propagate to
+        // mobile clients (sync sends voided rows) and cause inconsistent behaviour there.
+        for (AttendanceTypeContract contract : requestAttendanceTypes) {
+            Map<String, Object> rawConfig = contract.getConfig();
+            JsonObject config = rawConfig == null ? new JsonObject() : new JsonObject(rawConfig);
+            List<String> missing = new ArrayList<>();
+            if (AttendanceTypeConfigKey.stringValue(config, AttendanceTypeConfigKey.SESSION_OUTCOME_REASON_CONCEPT) == null)
+                missing.add(AttendanceTypeConfigKey.SESSION_OUTCOME_REASON_CONCEPT);
+            if (AttendanceTypeConfigKey.stringValue(config, AttendanceTypeConfigKey.ABSENCE_REASON_CONCEPT) == null)
+                missing.add(AttendanceTypeConfigKey.ABSENCE_REASON_CONCEPT);
+            if (!missing.isEmpty()) {
+                incomplete.add(new IncompleteAttendanceType(contract.getUuid(), contract.getName(), missing));
+            }
+        }
+        if (!incomplete.isEmpty()) {
+            throw new AttendanceConfigIncompleteException(incomplete);
+        }
+    }
+
+    public void validateRemovalReasonConceptSetting(JsonObject settings) {
+        if (settings == null) return;
+        Object configured = settings.get(String.valueOf(SubjectTypeSettingKey.removalReasonConceptUuid));
+        if (configured == null) return;
+        if (!(configured instanceof String) || ((String) configured).isEmpty()) {
+            throw new BadRequestError(String.format("'%s' must be a concept UUID string", SubjectTypeSettingKey.removalReasonConceptUuid));
+        }
+        String configuredUuid = (String) configured;
+        Concept concept = conceptService.get(configuredUuid);
+        if (concept == null) {
+            throw new BadRequestError(String.format("'%s' references unknown concept UUID '%s'", SubjectTypeSettingKey.removalReasonConceptUuid, configuredUuid));
+        }
+        if (concept.isVoided()) {
+            throw new BadRequestError(String.format("'%s' references voided concept '%s'", SubjectTypeSettingKey.removalReasonConceptUuid, concept.getName()));
+        }
+        if (!ConceptDataType.Coded.toString().equals(concept.getDataType())) {
+            throw new BadRequestError(String.format("'%s' must reference a Coded concept; '%s' is '%s'", SubjectTypeSettingKey.removalReasonConceptUuid, concept.getName(), concept.getDataType()));
+        }
+    }
+
+    public void seedDefaultAttendanceTypeIfEnabling(SubjectType subjectType, boolean wasAttendanceEnabled) {
+        if (!subjectType.isAttendanceEnabled() || wasAttendanceEnabled) {
+            return;
+        }
+        List<AttendanceType> existing = attendanceTypeRepository.findBySubjectTypeAndIsVoidedFalse(subjectType);
+        if (!existing.isEmpty()) {
+            return;
+        }
+        AttendanceType seed = new AttendanceType();
+        seed.assignUUIDIfRequired();
+        seed.setSubjectType(subjectType);
+        seed.setName(DEFAULT_ATTENDANCE_TYPE_NAME);
+        seed.setSortOrder(DEFAULT_ATTENDANCE_TYPE_SORT_ORDER);
+        seed.setConfig(new JsonObject());
+        attendanceTypeRepository.save(seed);
     }
 
     public void createOperationalSubjectType(OperationalSubjectTypeContract operationalSubjectTypeContract, Organisation organisation) {
@@ -149,12 +284,13 @@ public class SubjectTypeService implements NonScopeAwareService {
         return operationalSubjectTypeRepository.findAllByIsVoidedFalse().stream().map(OperationalSubjectType::getSubjectType);
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void updateSyncAttributesIfRequired(SubjectType subjectType) {
         Boolean isSyncAttribute1Usable = subjectType.isSyncRegistrationConcept1Usable();
         Boolean isSyncAttribute2Usable = subjectType.isSyncRegistrationConcept2Usable();
         boolean isSyncAttributeChanged = (isSyncAttribute1Usable != null && !isSyncAttribute1Usable) || (isSyncAttribute2Usable != null && !isSyncAttribute2Usable);
-        String lastJobStatus = avniJobRepository.getLastJobStatusForSubjectType(subjectType);
-        if (isSyncAttributeChanged || (lastJobStatus != null && avniJobRepository.getLastJobStatusForSubjectType(subjectType).equals("FAILED"))) {
+        String lastJobStatus = batchJobService.getLastSyncAttributesJobStatus(subjectType);
+        if (isSyncAttributeChanged || (lastJobStatus != null && lastJobStatus.equals("FAILED"))) {
             UserContext userContext = UserContextHolder.getUserContext();
             User user = userContext.getUser();
             Organisation organisation = userContext.getOrganisation();
@@ -169,8 +305,27 @@ public class SubjectTypeService implements NonScopeAwareService {
             try {
                 syncAttributesJobLauncher.run(syncAttributesJob, jobParameters);
             } catch (JobParametersInvalidException | JobExecutionAlreadyRunningException | JobInstanceAlreadyCompleteException | JobRestartException e) {
-                throw new RuntimeException(String.format("Error while starting the sync attribute job, %s", e.getMessage()));
+                throw new RuntimeException(String.format("Error while starting the sync attribute job, %s", e.getMessage()), e);
             }
+        }
+    }
+
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    public void
+    launchUserSubjectTypeJob(SubjectType subjectType) {
+        String jobUUID = UUID.randomUUID().toString();
+        UserContext userContext = UserContextHolder.getUserContext();
+        JobParameters jobParameters = new JobParametersBuilder()
+                .addString("uuid", jobUUID)
+                .addString("type", String.format("Subjects Create - %s", subjectType.getName()), false)
+                .addString("organisationUUID", userContext.getOrganisation().getUuid())
+                .addLong("userId", userContext.getUser().getId())
+                .addLong("subjectTypeId", subjectType.getId())
+                .toJobParameters();
+        try {
+            userSubjectTypeCreateJobLauncher.run(userSubjectTypeCreateJob, jobParameters);
+        } catch (JobParametersInvalidException | JobExecutionAlreadyRunningException | JobInstanceAlreadyCompleteException | JobRestartException e) {
+            throw new RuntimeException(String.format("Error while starting user subject type create job, %s", e.getMessage()), e);
         }
     }
 
@@ -179,8 +334,7 @@ public class SubjectTypeService implements NonScopeAwareService {
         Predicate<SubjectType> subjectTypeHasSyncAttributes = subjectType ->
                 Objects.nonNull(subjectType.getSyncRegistrationConcept1()) ||
                         Objects.nonNull(subjectType.getSyncRegistrationConcept2());
-
-        return subjectTypes.stream().
+        return subjectTypes.stream().sorted((a,b) -> (int) (a.getId() - b.getId())).
                 filter(subjectTypeHasSyncAttributes).
                 map(this::constructSyncAttributeHeadersForSubjectType).
                 flatMap(Collection::stream).
@@ -192,8 +346,118 @@ public class SubjectTypeService implements NonScopeAwareService {
                 subjectTypeWithSyncAttribute.getSyncRegistrationConcept2()};
 
         return Arrays.stream(syncAttributes).
-                filter(Objects::nonNull).
-                map(sa -> String.format("%s->%s", subjectTypeWithSyncAttribute.getName(),conceptService.get(sa).getName())).
+                filter(Objects::nonNull).sorted().
+                map(sa -> String.format("%s->%s", subjectTypeWithSyncAttribute.getName(), conceptService.get(sa).getName())).
                 collect(Collectors.toList());
+    }
+
+    public List<String> constructSyncAttributeAllowedValuesForSubjectTypes() {
+        List<SubjectType> subjectTypes = subjectTypeRepository.findByIsVoidedFalse();
+        Predicate<SubjectType> subjectTypeHasSyncAttributes = subjectType ->
+                Objects.nonNull(subjectType.getSyncRegistrationConcept1()) ||
+                        Objects.nonNull(subjectType.getSyncRegistrationConcept2());
+        return subjectTypes.stream().sorted((a,b) -> (int) (a.getId() - b.getId())).
+                filter(subjectTypeHasSyncAttributes).
+                map(this::constructSyncAttributeAllowedValuesForSubjectType).
+                flatMap(Collection::stream).
+                collect(Collectors.toList());
+    }
+
+    private List<String> constructSyncAttributeAllowedValuesForSubjectType(SubjectType subjectTypeWithSyncAttribute) {
+        String[] syncAttributes = new String[]{subjectTypeWithSyncAttribute.getSyncRegistrationConcept1(),
+                subjectTypeWithSyncAttribute.getSyncRegistrationConcept2()};
+
+        return Arrays.stream(syncAttributes).
+                filter(Objects::nonNull).sorted().
+                map(sa -> String.format("\"Mandatory field. Allowed values: %s\"", conceptService.getAllowedValuesForSyncConcept(conceptService.get(sa))))
+                .collect(Collectors.toList());
+    }
+
+    public JsonObject getDefaultSettings() {
+        JsonObject defaultSettings = new JsonObject();
+        defaultSettings.put(String.valueOf(SubjectTypeSettingKey.displayPlannedEncounters), true);
+        defaultSettings.put(String.valueOf(SubjectTypeSettingKey.displayRegistrationDetails), true);
+        return defaultSettings;
+    }
+
+    public AddressLevelTypes getRegistrableLocationTypes(SubjectType subjectType) {
+        OrganisationConfig organisationConfig = this.organisationConfigService.getCurrentOrganisationConfig();
+        SubjectTypeSetting registrationSetting = organisationConfig.getRegistrationSetting(subjectType);
+        AddressLevelTypes locationTypes = addressLevelTypeRepository.getAllAddressLevelTypes();
+        if (locationTypes.isEmpty()) {
+            throw new RuntimeException("No address level types found");
+        }
+
+        List<String> customRegistrationLevelTypeUuids = (registrationSetting != null && registrationSetting.getLocationTypeUUIDs() != null && !registrationSetting.getLocationTypeUUIDs().isEmpty())
+                ? registrationSetting.getLocationTypeUUIDs() : null;
+        TreeSet<String> validLocationHierarchies = locationHierarchyService.fetchAndFilterHierarchies();
+        List<List<String>> hierarchies = validLocationHierarchies.stream()
+                .map(hierarchy -> Arrays.asList(hierarchy.split("\\.")))
+                .collect(Collectors.toList());
+
+        if (customRegistrationLevelTypeUuids != null) {
+            List<String> customLevelTypeUuids = registrationSetting.getAddressLevelTypes(locationTypes).stream().map(alt -> alt.getUuid()).collect(Collectors.toList());
+
+            Set<String> addressUuids = hierarchies.stream()
+                    .map(typesInHierarchy -> typesInHierarchy.stream()
+                            .map(altUuid -> customLevelTypeUuids.contains(altUuid) ? typesInHierarchy.subList(typesInHierarchy.indexOf(altUuid), typesInHierarchy.size()) : null)
+                            .filter(Objects::nonNull)
+                            .flatMap(Collection::stream)
+                            .collect(Collectors.toList()))
+                    .flatMap(Collection::stream)
+                    .collect(Collectors.toSet());
+
+            return new AddressLevelTypes(locationTypes.stream().filter(alt -> addressUuids.contains(alt.getUuid())).collect(Collectors.toList()));
+        } else {
+            List<String> lowestAddressUuids = hierarchies.stream().map(lh -> lh.get(lh.size() - 1)).collect(Collectors.toList());
+            return new AddressLevelTypes(locationTypes.stream().filter(alt -> lowestAddressUuids.contains(alt.getUuid())).collect(Collectors.toList()));
+        }
+    }
+
+    @Transactional
+    public void saveSubjectTypesFromBundle(SubjectTypeContract[] subjectTypeContracts) {
+        for (SubjectTypeContract subjectTypeContract : subjectTypeContracts) {
+            try {
+                // Skip the default-attendance-type seed: the bundle's attendanceTypes.json runs
+                // immediately after this and carries the source org's rows (seed-on-enable rows
+                // included). Seeding here would mint a destination-only row with a fresh UUID
+                // that the bundle row's INSERT then collides with on the partial unique index
+                // (subject_type_id, lower(name)) WHERE is_voided = false.
+                SubjectTypeUpsertResponse response = this.saveSubjectType(subjectTypeContract, true, true);
+                if (response.isSubjectTypeNotPresentInDB() && Subject.valueOf(subjectTypeContract.getType()).equals(Subject.User)) {
+                    userService.ensureSubjectsForUserSubjectType(response.getSubjectType());
+                }
+            } catch (Exception e) {
+                throw new BulkItemSaveException(subjectTypeContract, e);
+            }
+        }
+    }
+
+    public void saveOperationalSubjectTypes(OperationalSubjectTypesContract operationalSubjectTypesContract, Organisation organisation) {
+        for (OperationalSubjectTypeContract ostc : operationalSubjectTypesContract.getOperationalSubjectTypes()) {
+            try {
+                this.createOperationalSubjectType(ostc, organisation);
+            } catch (Exception e) {
+                throw new BulkItemSaveException(ostc, e);
+            }
+        }
+    }
+
+    public static class SubjectTypeUpsertResponse {
+        boolean isSubjectTypeNotPresentInDB;
+        SubjectType subjectType;
+
+        public SubjectTypeUpsertResponse(boolean isSubjectTypeNotPresentInDB, SubjectType subjectType) {
+            this.isSubjectTypeNotPresentInDB = isSubjectTypeNotPresentInDB;
+            this.subjectType = subjectType;
+        }
+
+        public boolean isSubjectTypeNotPresentInDB() {
+            return isSubjectTypeNotPresentInDB;
+        }
+
+        public SubjectType getSubjectType() {
+            return subjectType;
+        }
     }
 }

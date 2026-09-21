@@ -1,15 +1,18 @@
 package org.avni.server.framework.security;
 
 import com.auth0.jwk.SigningKeyNotFoundException;
+import com.auth0.jwt.exceptions.TokenExpiredException;
 import org.avni.server.dao.AccountAdminRepository;
 import org.avni.server.dao.OrganisationRepository;
 import org.avni.server.dao.UserRepository;
-import org.avni.server.domain.AccountAdmin;
+import org.avni.server.dao.metabase.MetabaseDatabaseRepository;
 import org.avni.server.domain.Organisation;
 import org.avni.server.domain.User;
 import org.avni.server.domain.UserContext;
+import org.avni.server.domain.accessControl.AvniNoUserSessionException;
 import org.avni.server.service.IAMAuthService;
 import org.avni.server.service.IdpServiceFactory;
+import org.avni.server.service.UserService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.Authentication;
@@ -17,7 +20,7 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -26,20 +29,18 @@ import java.util.stream.Collectors;
 @Service
 public class AuthService {
     public final static SimpleGrantedAuthority USER_AUTHORITY = new SimpleGrantedAuthority(User.USER);
-    public final static SimpleGrantedAuthority ADMIN_AUTHORITY = new SimpleGrantedAuthority(User.ADMIN);
-    public final static SimpleGrantedAuthority ORGANISATION_ADMIN_AUTHORITY = new SimpleGrantedAuthority(User.ORGANISATION_ADMIN);
-    public final static List<SimpleGrantedAuthority> ALL_AUTHORITIES = Arrays.asList(USER_AUTHORITY, ADMIN_AUTHORITY, ORGANISATION_ADMIN_AUTHORITY);
+    public final static List<SimpleGrantedAuthority> ALL_AUTHORITIES = Collections.singletonList(USER_AUTHORITY);
     private final UserRepository userRepository;
     private final OrganisationRepository organisationRepository;
-    private final AccountAdminRepository accountAdminRepository;
+    private final UserService userService;
     private final IdpServiceFactory idpServiceFactory;
 
     @Autowired
-    public AuthService(UserRepository userRepository, OrganisationRepository organisationRepository, AccountAdminRepository accountAdminRepository, IdpServiceFactory idpServiceFactory) {
+    public AuthService(UserRepository userRepository, OrganisationRepository organisationRepository, AccountAdminRepository accountAdminRepository, IdpServiceFactory idpServiceFactory, UserService userService) {
         this.idpServiceFactory = idpServiceFactory;
         this.userRepository = userRepository;
         this.organisationRepository = organisationRepository;
-        this.accountAdminRepository = accountAdminRepository;
+        this.userService = userService;
     }
 
     public UserContext authenticateByUserName(String username, String organisationUUID) {
@@ -52,12 +53,21 @@ public class AuthService {
         IAMAuthService iamAuthService = idpServiceFactory.getAuthService();
         UserContext userContext;
         try {
-            userContext = changeUser(iamAuthService.getUserFromToken(authToken), organisationUUID);
-        } catch (SigningKeyNotFoundException signingKeyNotFoundException) {
-            throw new RuntimeException(signingKeyNotFoundException);
+            User userFromToken = iamAuthService.getUserFromToken(authToken);
+            userContext = changeUser(userFromToken, organisationUUID);
+        } catch (SigningKeyNotFoundException | TokenExpiredException exception) {
+            throw new AvniNoUserSessionException(exception);
         }
         userContext.setAuthToken(authToken);
         return userContext;
+    }
+
+    public UserContext tryAuthenticateByToken(String authToken, String organisationUUID) {
+        try {
+            return this.authenticateByToken(authToken, organisationUUID);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     public UserContext authenticateByUserId(Long userId, String organisationUUID) {
@@ -69,17 +79,25 @@ public class AuthService {
         throw new RuntimeException(String.format("Not found: User{id='%s'}", userId));
     }
 
+    public String generateTokenForUser(String username, String password) {
+        becomeSuperUser();
+        IAMAuthService iamAuthService = idpServiceFactory.getAuthService();
+        try {
+            return iamAuthService.generateTokenForUser(username, password);
+        } catch (Exception exception) {
+            throw new AvniNoUserSessionException(exception);
+        }
+    }
+
     private Authentication attemptAuthentication(User user, String organisationUUID) {
         UserContext userContext = new UserContext();
         UserContextHolder.create(userContext);
         if (user == null) {
             return null;
         }
-        List<AccountAdmin> accountAdmins = accountAdminRepository.findByUser_Id(user.getId());
-        user.setAdmin(accountAdmins.size() > 0);
+        user.setAdmin(userService.isAdmin(user));
         Organisation organisation = null;
-        if (user.isAdmin() && organisationUUID != null) {
-            user.setOrgAdmin(true);
+        if (organisationUUID != null) {
             organisation = organisationRepository.findByUuid(organisationUUID);
         } else if (user.getOrganisationId() != null) {
             organisation = organisationRepository.findOne(user.getOrganisationId());
@@ -97,13 +115,18 @@ public class AuthService {
     }
 
     private UserContext changeUser(User user, String organisationUUID) {
+        if (user == null) {
+            throw new AvniNoUserSessionException("No user, or not logged in");
+        }
         SecurityContextHolder.getContext().setAuthentication(attemptAuthentication(user, organisationUUID));
+        MetabaseDatabaseRepository.clearThreadLocalContext();
         return UserContextHolder.getUserContext();
     }
 
     private void becomeSuperUser() {
         UserContextHolder.clear();
         SecurityContextHolder.getContext().setAuthentication(createTempAuth(ALL_AUTHORITIES));
+        MetabaseDatabaseRepository.clearThreadLocalContext();
     }
 
     private Authentication createTempAuth(List<SimpleGrantedAuthority> authorities) {

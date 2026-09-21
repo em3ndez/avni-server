@@ -1,45 +1,48 @@
 package org.avni.server.web;
 
-import org.avni.server.dao.DashboardRepository;
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.GroupDashboardRepository;
-import org.avni.server.dao.GroupRepository;
-import org.avni.server.domain.Dashboard;
-import org.avni.server.domain.Group;
+import org.avni.server.domain.CHSEntity;
 import org.avni.server.domain.GroupDashboard;
-import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.domain.ValidationException;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.service.GroupDashboardService;
+import org.avni.server.service.accessControl.AccessControlService;
+import org.avni.server.util.DateTimeUtil;
 import org.avni.server.web.request.GroupDashboardContract;
+import org.joda.time.DateTime;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.domain.Pageable;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
+import org.springframework.hateoas.Link;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
-@RestController
-public class GroupDashboardController {
+import static org.avni.server.web.resourceProcessors.ResourceProcessor.addAuditFields;
 
+@RestController
+public class GroupDashboardController implements RestControllerResourceProcessor<GroupDashboard> {
     private final GroupDashboardRepository groupDashboardRepository;
     private final GroupDashboardService groupDashboardService;
-    private final DashboardRepository dashboardRepository;
-    private final GroupRepository groupRepository;
+    private final AccessControlService accessControlService;
 
     @Autowired
     public GroupDashboardController(GroupDashboardRepository groupDashboardRepository,
-                                    GroupDashboardService groupDashboardService, DashboardRepository dashboardRepository, GroupRepository groupRepository) {
+                                    GroupDashboardService groupDashboardService, AccessControlService accessControlService) {
         this.groupDashboardRepository = groupDashboardRepository;
         this.groupDashboardService = groupDashboardService;
-        this.dashboardRepository = dashboardRepository;
-        this.groupRepository = groupRepository;
+        this.accessControlService = accessControlService;
     }
 
     @GetMapping(value = "/web/groupDashboard")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
     @ResponseBody
+    @Transactional(readOnly = true)
     public List<GroupDashboardContract> getAll() {
         return groupDashboardRepository.findAllByIsVoidedFalse()
                 .stream().map(GroupDashboardContract::fromEntity)
@@ -47,8 +50,8 @@ public class GroupDashboardController {
     }
 
     @GetMapping(value = "/web/groupDashboard/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
     @ResponseBody
+    @Transactional(readOnly = true)
     public ResponseEntity<GroupDashboardContract> getById(@PathVariable Long id) {
         Optional<GroupDashboard> groupDashboard = groupDashboardRepository.findById(id);
         return groupDashboard.map(d -> ResponseEntity.ok(GroupDashboardContract.fromEntity(d)))
@@ -56,35 +59,23 @@ public class GroupDashboardController {
     }
 
     @PostMapping(value = "/web/groupDashboard")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
     @Transactional
-    public ResponseEntity addUsersToGroup(@RequestBody List<GroupDashboardContract> request) {
-        List<GroupDashboard> groupDashboards = new ArrayList<>();
-
-        for (GroupDashboardContract contract : request) {
-            Dashboard dashboard = dashboardRepository.findOne(contract.getDashboardId());
-            Group group = groupRepository.findOne(contract.getGroupId());
-            if (dashboard == null || group == null) {
-                return ResponseEntity.badRequest().body(String.format("Invalid dashboard id %d or group id %d", contract.getDashboardId(), contract.getGroupId()));
-            }
-
-            GroupDashboard groupDashboard = new GroupDashboard();
-            groupDashboard.setDashboard(dashboard);
-            groupDashboard.setGroup(group);
-            groupDashboard.assignUUID();
-            groupDashboard.setOrganisationId(UserContextHolder.getUserContext().getOrganisationId());
-            groupDashboards.add(groupDashboard);
+    public ResponseEntity saveGroupDashboards(@RequestBody List<GroupDashboardContract> request) {
+        accessControlService.checkPrivilege(PrivilegeType.EditOfflineDashboardAndReportCard);
+        try {
+            List<GroupDashboard> groupDashboards = groupDashboardService.save(request);
+            return ResponseEntity.ok(groupDashboardRepository.saveAll(groupDashboards));
+        } catch (ValidationException e) {
+            return ResponseEntity.badRequest().body(e.getMessage());
         }
-
-        return ResponseEntity.ok(groupDashboardRepository.saveAll(groupDashboards));
     }
 
     @PutMapping(value = "/web/groupDashboard/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
     @Transactional
     public ResponseEntity<GroupDashboardContract> editGroupDashboard(@PathVariable Long id, @RequestBody GroupDashboardContract groupDashboardContract) {
+        accessControlService.checkPrivilege(PrivilegeType.EditOfflineDashboardAndReportCard);
         Optional<GroupDashboard> groupDashboard = groupDashboardRepository.findById(id);
         if (!groupDashboard.isPresent()) {
             return ResponseEntity.notFound().build();
@@ -94,19 +85,39 @@ public class GroupDashboardController {
     }
 
     @DeleteMapping(value = "/web/groupDashboard/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
     @Transactional
     public void deleteGroupDashboard(@PathVariable Long id) {
+        accessControlService.checkPrivilege(PrivilegeType.EditOfflineDashboardAndReportCard);
         Optional<GroupDashboard> groupDashboard = groupDashboardRepository.findById(id);
         groupDashboard.ifPresent(groupDashboardService::delete);
     }
 
     @RequestMapping(value = "/groups/{id}/dashboards", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin', 'admin')")
+    @Transactional(readOnly = true)
     public List<GroupDashboardContract> getDashboardsByGroupId(@PathVariable("id") Long id) {
-        return groupDashboardRepository.findByGroup_IdAndIsVoidedFalse(id).stream()
+        return groupDashboardRepository.findByGroup_IdAndIsVoidedFalseOrderByDashboardName(id).stream()
                 .map(GroupDashboardContract::fromEntity)
                 .collect(Collectors.toList());
+    }
+
+    @GetMapping(value = "/v2/groupDashboard/search/lastModified")
+    @Transactional(readOnly = true)
+    public CollectionModel<EntityModel<GroupDashboard>> getDashboardFilters(@RequestParam("lastModifiedDateTime")
+                                                                         @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
+                                                                         @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
+                                                                         Pageable pageable) {
+        return wrap(groupDashboardRepository.findByLastModifiedDateTimeIsGreaterThanEqualAndLastModifiedDateTimeLessThanEqualOrderByLastModifiedDateTimeAscIdAsc(lastModifiedDateTime.toDate(),
+                CHSEntity.toDate(now), pageable));
+    }
+
+    @Override
+    public EntityModel<GroupDashboard> process(EntityModel<GroupDashboard> resource) {
+        GroupDashboard entity = resource.getContent();
+        resource.removeLinks();
+        resource.add(Link.of(entity.getDashboard().getUuid(), "dashboardUUID"));
+        resource.add(Link.of(entity.getGroup().getUuid(), "groupUUID"));
+        addAuditFields(entity, resource);
+        return resource;
     }
 }

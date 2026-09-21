@@ -1,45 +1,70 @@
 package org.avni.server.dao;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+import jakarta.persistence.Query;
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.search.SearchBuilder;
 import org.avni.server.dao.search.SqlQuery;
+import org.avni.server.domain.SubjectType;
 import org.avni.server.web.request.webapp.search.SubjectSearchRequest;
-import org.hibernate.query.internal.NativeQueryImpl;
+import org.hibernate.query.sql.internal.NativeQueryImpl;
 import org.hibernate.transform.AliasToEntityMapResultTransformer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
+import org.springframework.util.StringUtils;
 
-import javax.persistence.EntityManager;
-import javax.persistence.PersistenceContext;
-import javax.persistence.Query;
-import javax.transaction.Transactional;
-import java.math.BigInteger;
 import java.util.List;
 import java.util.Map;
 
 @Repository
-public class SubjectSearchRepository {
+public class SubjectSearchRepository extends RoleSwitchableRepository {
+    private final Logger logger = LoggerFactory.getLogger(SubjectSearchRepository.class);
+    private final SubjectTypeRepository subjectTypeRepository;
 
     @PersistenceContext
     private EntityManager entityManager;
 
-    @Transactional
-    public List<Map<String,Object>> search(SubjectSearchRequest searchRequest, SearchBuilder searchBuilder) {
-        SqlQuery query = searchBuilder.getSQLResultQuery(searchRequest);
-        Query sql = entityManager.createNativeQuery(query.getSql());
-        NativeQueryImpl nativeQuery = (NativeQueryImpl) sql;
-        nativeQuery.setResultTransformer(AliasToEntityMapResultTransformer.INSTANCE);
-        query.getParameters().forEach((name, value) -> {
-            sql.setParameter(name, value);
-        });
-        return sql.getResultList();
+    public SubjectSearchRepository(EntityManager entityManager, SubjectTypeRepository subjectTypeRepository) {
+        super(entityManager);
+        this.subjectTypeRepository = subjectTypeRepository;
     }
 
-    public BigInteger getTotalCount(SubjectSearchRequest searchRequest, SearchBuilder searchBuilder) {
-        SqlQuery query = searchBuilder.getSQLCountQuery(searchRequest);
-        Query sql = entityManager.createNativeQuery(query.getSql());
-        query.getParameters().forEach((name, value) -> {
-            sql.setParameter(name, value);
-        });
+    @Transactional(readOnly = true)
+    public List<Map<String, Object>> search(SubjectSearchRequest searchRequest, SearchBuilder searchBuilder) {
+        SubjectType subjectType = StringUtils.isEmpty(searchRequest.getSubjectType()) ? null : subjectTypeRepository.findByUuid(searchRequest.getSubjectType());
+        SqlQuery query = searchBuilder.getSQLResultQuery(searchRequest, subjectType);
+        try {
+            setRoleToNone();
+            logger.debug("Executing query: " + query.getSql());
+            logger.debug("Parameters: " + query.getParameters());
+            Query sql = entityManager.createNativeQuery(query.getSql());
+            NativeQueryImpl nativeQuery = (NativeQueryImpl) sql;
+            nativeQuery.setResultTransformer(AliasToEntityMapResultTransformer.INSTANCE);
+            query.getParameters().forEach((name, value) -> {
+                sql.setParameter(name, value);
+            });
+            return sql.getResultList();
+        } finally {
+            setRoleBackToUser();
+        }
+    }
 
-        return (BigInteger) sql.getSingleResult();
+    @Transactional(readOnly = true)
+    public Long getTotalCount(SubjectSearchRequest searchRequest, SearchBuilder searchBuilder) {
+        SubjectType subjectType = StringUtils.isEmpty(searchRequest.getSubjectType()) ? null : subjectTypeRepository.findByUuid(searchRequest.getSubjectType());
+        SqlQuery query = searchBuilder.getSQLCountQuery(searchRequest, subjectType);
+        try {
+            setRoleToNone();
+            Query sql = entityManager.createNativeQuery(query.getSql());
+            query.getParameters().forEach((name, value) -> {
+                sql.setParameter(name, value);
+            });
+
+            return (Long) sql.getSingleResult();
+        } finally {
+            setRoleBackToUser();
+        }
     }
 }

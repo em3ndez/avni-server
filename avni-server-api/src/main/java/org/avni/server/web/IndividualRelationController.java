@@ -1,41 +1,43 @@
 package org.avni.server.web;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.individualRelationship.IndividualRelationRepository;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.domain.individualRelationship.IndividualRelation;
 import org.avni.server.service.IndividualRelationService;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.web.request.IndividualRelationContract;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
 import java.util.List;
 import java.util.Optional;
 
 @RestController
 public class IndividualRelationController {
-
-    private IndividualRelationRepository individualRelationRepository;
-    private IndividualRelationService individualRelationService;
+    private final IndividualRelationRepository individualRelationRepository;
+    private final IndividualRelationService individualRelationService;
+    private final AccessControlService accessControlService;
 
     @Autowired
     public IndividualRelationController(IndividualRelationRepository individualRelationRepository,
-                                        IndividualRelationService individualRelationService) {
+                                        IndividualRelationService individualRelationService, AccessControlService accessControlService) {
         this.individualRelationRepository = individualRelationRepository;
         this.individualRelationService = individualRelationService;
+        this.accessControlService = accessControlService;
     }
 
     @GetMapping(value = "/web/relation")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
+    @Transactional(readOnly = true)
     public List<IndividualRelationContract> getAllIndividualRelations() {
         return individualRelationService.getAll();
     }
 
     @GetMapping(value = "/web/relation/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
+    @Transactional(readOnly = true)
     public ResponseEntity<IndividualRelationContract> getIndividualRelation(@PathVariable Long id) {
         Optional<IndividualRelation> relation = individualRelationRepository.findById(id);
         return relation.map(individualRelation ->
@@ -44,19 +46,19 @@ public class IndividualRelationController {
     }
 
     @PostMapping(value = "/web/relation")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
     @Transactional
     public ResponseEntity<IndividualRelationContract> newIndividualRelation(@RequestBody IndividualRelationContract individualRelationContract) {
+        accessControlService.checkPrivilege(PrivilegeType.EditRelation);
         IndividualRelation relation = individualRelationService.saveRelation(individualRelationContract);
         return ResponseEntity.ok(individualRelationService.toResponseObject(relation));
     }
 
     @PostMapping(value = "/web/relation/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
     @Transactional
     public ResponseEntity saveIndividualRelation(@PathVariable Long id, @RequestBody IndividualRelationContract individualRelationContract) {
+        accessControlService.checkPrivilege(PrivilegeType.EditRelation);
         Optional<IndividualRelation> relation = individualRelationRepository.findById(id);
         if (!relation.isPresent()) {
             return ResponseEntity.notFound().build();
@@ -68,15 +70,10 @@ public class IndividualRelationController {
     }
 
     @DeleteMapping(value = "/web/relation/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @ResponseBody
     @Transactional
     public void deleteIndividualRelation(@PathVariable Long id) {
-        Optional<IndividualRelation> relation = individualRelationRepository.findById(id);
-        if (relation.isPresent()) {
-            IndividualRelation individualRelation = relation.get();
-            individualRelation.setVoided(true);
-            individualRelationRepository.save(individualRelation);
-        }
+        accessControlService.checkPrivilege(PrivilegeType.EditRelation);
+        individualRelationService.deleteRelation(id);
     }
 }

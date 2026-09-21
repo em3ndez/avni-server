@@ -1,12 +1,12 @@
 package org.avni.server.framework.sync;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
+
 import java.util.*;
 
 public class MutableRequestWrapper extends HttpServletRequestWrapper {
-    private HttpServletRequest wrapped;
-
+    private final HttpServletRequest wrapped;
     private Map<String, String[]> parameterMap;
 
     public MutableRequestWrapper(HttpServletRequest wrapped) {
@@ -24,8 +24,8 @@ public class MutableRequestWrapper extends HttpServletRequestWrapper {
             values = new String[0];
         }
         List<String> list = new ArrayList<String>(values.length + 1);
-        list.addAll(Arrays.asList(values));
         list.add(value);
+        list.addAll(Arrays.asList(values));
         parameterMap.put(name, list.toArray(new String[0]));
     }
 

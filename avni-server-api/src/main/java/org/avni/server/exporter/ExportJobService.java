@@ -2,7 +2,8 @@ package org.avni.server.exporter;
 
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.transaction.annotation.Transactional;
+import jakarta.validation.constraints.NotNull;
 import org.avni.server.dao.AvniJobRepository;
 import org.avni.server.dao.ExportJobParametersRepository;
 import org.avni.server.dao.JobStatus;
@@ -16,6 +17,7 @@ import org.avni.server.util.ObjectMapperSingleton;
 import org.avni.server.web.external.request.export.ExportJobRequest;
 import org.avni.server.web.external.request.export.ExportOutput;
 import org.avni.server.web.external.request.export.ExportV2JobRequest;
+import org.avni.server.web.util.ErrorBodyBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.Job;
@@ -34,8 +36,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.RequestBody;
 
-import javax.transaction.Transactional;
-import javax.validation.constraints.NotNull;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -48,19 +50,21 @@ public class ExportJobService {
 
     private final JobLauncher bgJobLauncher;
     private final ExportJobParametersRepository exportJobParametersRepository;
+    private final ErrorBodyBuilder errorBodyBuilder;
 
     @Autowired
     public ExportJobService(Job exportVisitJob, JobLauncher bgJobLauncher, AvniJobRepository avniJobRepository,
-                            Job exportV2Job, ExportJobParametersRepository exportJobParametersRepository) {
+                            Job exportV2Job, ExportJobParametersRepository exportJobParametersRepository, ErrorBodyBuilder errorBodyBuilder) {
         this.avniJobRepository = avniJobRepository;
         this.exportV2Job = exportV2Job;
         this.exportJobParametersRepository = exportJobParametersRepository;
+        this.errorBodyBuilder = errorBodyBuilder;
         logger = LoggerFactory.getLogger(getClass());
         this.bgJobLauncher = bgJobLauncher;
         this.exportVisitJob = exportVisitJob;
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public Page<JobStatus> getAll(@NotNull Pageable pageable) {
         User user = UserContextHolder.getUserContext().getUser();
         String jobFilterCondition = " and subjectTypeUUID <> '' ";
@@ -81,18 +85,21 @@ public class ExportJobService {
             logger.error(errorMessage);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorMessage);
         }
-        JobParameters jobParameters = getCommonJobParams(userContext)
-                .addString("programUUID", exportJobRequest.getProgramUUID(), false)
+        JobParametersBuilder jobParametersBuilder = getCommonJobParams(userContext)
                 .addString("subjectTypeUUID", exportJobRequest.getSubjectTypeUUID(), false)
-                .addString("encounterTypeUUID", exportJobRequest.getEncounterTypeUUID(), false)
                 .addDate("startDate", exportJobRequest.getStartDate(), false)
                 .addDate("endDate", exportJobRequest.getEndDate(), false)
                 .addString("reportType", exportJobRequest.getReportType().name())
-                .addString("addressIds", exportJobRequest.getAddressLevelString())
-                .addString("timeZone", exportJobRequest.getTimeZone())
-                .addString("includeVoided", String.valueOf(exportJobRequest.isIncludeVoided()))
-                .toJobParameters();
-        return launchJob(jobParameters, exportVisitJob);
+                .addString("addressIds", Optional.ofNullable(exportJobRequest.getAddressLevelString()).orElse("[]"))
+                .addString("timeZone", Optional.ofNullable(exportJobRequest.getTimeZone()).orElse("Asia/Calcutta"))
+                .addString("includeVoided", String.valueOf(exportJobRequest.isIncludeVoided()));
+        if (Objects.nonNull(exportJobRequest.getProgramUUID())) {
+            jobParametersBuilder.addString("programUUID", exportJobRequest.getProgramUUID(), false);
+        }
+        if (Objects.nonNull(exportJobRequest.getEncounterTypeUUID())) {
+            jobParametersBuilder.addString("encounterTypeUUID", exportJobRequest.getEncounterTypeUUID(), false);
+        }
+        return launchJob(jobParametersBuilder.toJobParameters(), exportVisitJob);
     }
 
     public ResponseEntity<?> runExportV2Job(ExportV2JobRequest exportJobRequest) {
@@ -111,7 +118,7 @@ public class ExportJobService {
         try {
             bgJobLauncher.run(job, jobParameters);
         } catch (JobParametersInvalidException | JobExecutionAlreadyRunningException | JobInstanceAlreadyCompleteException | JobRestartException e) {
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(errorBodyBuilder.getErrorBody(e));
         }
         return ResponseEntity.ok(true);
     }

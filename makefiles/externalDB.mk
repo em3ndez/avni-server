@@ -1,4 +1,27 @@
-restore_staging_dump:
+restore-dump-only:
+ifndef dumpFile
+	@echo "Provde the dumpFile variable"
+	exit 1
+else
+	psql -U openchs -d avni_org < $(dumpFile)
+endif
+
+restore-org-dump:
+ifndef dumpFile
+	@echo "Provde the dumpFile variable"
+	exit 1
+endif
+ifndef dbRole
+	@echo "Provde the dbRole variable"
+	exit 1
+endif
+	-sed -i '' 's/from form/from public.form/g' "$(dumpFile)"
+	-sed -i '' 's/inner join form/inner join public.form/g' "$(dumpFile)"
+	-make _clean_db _build_db database=avni_org
+	-make create-local-db-impl-user db=avni_org user=$(dbRole)
+	-make restore-dump-only dumpFile=$(dumpFile)
+
+restore-staging-dump:
 ifndef dumpFile
 	@echo "Provde the dumpFile variable"
 	exit 1
@@ -7,7 +30,7 @@ else
 	psql -U openchs -d avni_staging < $(dumpFile)
 endif
 
-restore_staging_dump_release_branch:
+restore-staging-dump-release-branch:
 ifndef dumpFile
 	@echo "Provde the dumpFile variable"
 	exit 1
@@ -16,18 +39,171 @@ else
 	psql -U openchs -d avni_staging_released < $(dumpFile)
 endif
 
-create_local_staging_db_user:
+create-local-db-impl-user: ## Creates new implementation db user in local staging database
 ifndef user
 	@echo "Provde the variable user"
 	exit 1
-else
-	-psql -U $(su) -d avni_staging -c "select create_db_user('$(user)', 'password')"
 endif
+ifndef db
+	@echo "Provde the variable db"
+	exit 1
+endif
+	-psql -U $(su) -d $(db) -c "select create_db_user('$(user)', 'password')"
+	-psql -U $(su) -d $(db) -c "select create_implementation_schema('$(user)', '$(user)')"
+	-psql -U $(su) -d $(db) -c "grant all privileges on all tables in schema $(user) to $(user)"
 
-create_local_staging_db_user_release_branch:
+create-all-local-staging-db-user: ## Creates all implementation db users in local staging database
+	-psql -U $(su) -d avni_staging -c "select create_db_user(db_user, 'password') from organisation where is_voided = false and id <> 1"
+
+create-local-staging-db-user-release-branch:
 ifndef user
 	@echo "Provde the variable"
 	exit 1
 else
 	-psql -U $(su) -d avni_staging_released -c "select create_db_user('$(user)', 'password')"
+endif
+
+run-dump-only:
+ifndef dumpFile
+	@echo "Provde the dumpFile variable"
+	exit 1
+else
+	psql -U openchs -d avni_org < $(dumpFile)
+endif
+
+tunnel-db:
+ifndef host
+	@echo "Provde the host variable"
+	exit 1
+endif
+ifndef dbServer
+	@echo "Provde the hostName variable"
+	exit 1
+endif
+	ssh $(host) -L 5433:$(dbServer):5432
+
+tunnel-prerelease-db:
+	make tunnel-db host=avni-prerelease dbServer=prereleasedb.avniproject.org
+tunnel-prerelease-metabase-db:
+	ssh avni-staging -L 5434:stagingdb.avniproject.org:5432
+tunnel-prod-read-db:
+	make tunnel-db host=avni-prod dbServer=serverdb.read.openchs.org
+tunnel-metabase-db:
+	make tunnel-db host=reporting-metabase dbServer=reportingdb.cnwnxgm8rsnb.ap-south-1.rds.amazonaws.com
+tunnel-prod-db:
+	make tunnel-db host=avni-prod dbServer=serverdb.openchs.org
+tunnel-staging-db:
+	make tunnel-db host=avni-staging dbServer=stagingdb.openchs.org
+tunnel-rwb-prod:
+	make tunnel-db host=rwb-prod dbServer=serverdb.rwb.avniproject.org
+tunnel-rwb-staging-db:
+	make tunnel-db host=rwb-staging dbServer=stagingdb.rwb.avniproject.org
+
+dump-org-data-prerelease:
+	make dump-org-data dbRole=$(dbRole) prefix=prerelease
+dump-org-data-prerelease-with-copy:
+	make dump-org-data-with-copy dbRole=$(dbRole) prefix=prerelease
+dump-org-data-prod:
+	make dump-org-data dbRole=$(dbRole) prefix=prod
+dump-org-data-prod-with-copy:
+	make dump-org-data-with-copy dbRole=$(dbRole) prefix=prod
+dump-org-data-staging:
+	make dump-org-data dbRole=$(dbRole) prefix=staging
+
+dump-org-data-with-copy:
+ifndef dbRole
+	@echo "Provde the dbRole variable"
+	exit 1
+endif
+	pg_dump -h localhost -p 5433 \
+		--dbname=openchs \
+		--username=openchs \
+		--role=$(dbRole) \
+		--file=$(HOME)/projects/avni/avni-db-dumps/$(prefix)-$(dbRole).sql \
+		--enable-row-security --verbose --schema=public --host=localhost \
+		--exclude-table-data=audit \
+		--exclude-table-data='public.sync_telemetry' \
+		--exclude-table-data='rule_failure_log' \
+		--exclude-table-data='scheduled_job_run' \
+		--exclude-table-data='qrtz_*' \
+		--exclude-table-data='batch_*'
+
+dump-org-data:
+ifndef dbRole
+	@echo "Provde the dbRole variable"
+	exit 1
+endif
+	pg_dump -h localhost -p 5433 \
+		--schema=public \
+		--dbname=openchs \
+		--username=openchs \
+		--role=$(dbRole) \
+		--file=$(HOME)/projects/avni/avni-db-dumps/$(prefix)-$(dbRole).sql \
+		--enable-row-security --verbose --schema=public --host=localhost \
+		--exclude-table-data=audit \
+		--exclude-table-data='public.sync_telemetry' \
+		--exclude-table-data='rule_failure_log' \
+		--exclude-table-data='batch_*' \
+		--exclude-table-data='scheduled_job_run' \
+		--exclude-table-data='qrtz_*'
+
+dump-org-data-without-etl:
+ifndef dbRole
+	@echo "Provde the dbRole variable"
+	exit 1
+endif
+	pg_dump -h localhost -p 5433 \
+		--dbname=openchs \
+		--username=openchs \
+		--role=$(dbRole) \
+		--file=$(HOME)/projects/avni/avni-db-dumps/$(prefix)-$(dbRole).sql \
+		--enable-row-security --verbose --schema=public --host=localhost \
+		--exclude-table-data=audit \
+		--exclude-table-data='public.sync_telemetry' \
+		--exclude-table-data='rule_failure_log' \
+		--exclude-table-data='batch_*' \
+		--exclude-table-data='scheduled_job_run' \
+		--exclude-table-data='qrtz_*'
+		--exclude-table='public.individual_copy' \
+		--exclude-table='public.program_enrolment_copy' \
+		--exclude-table='public.encounter_copy' \
+		--exclude-table='public.program_encounter_copy' \
+		--exclude-table='public.individual_copy_ck' \
+		--exclude-table='public.program_enrolment_ck' \
+		--exclude-table='public.encounter_ck' \
+		--exclude-table='public.program_encounter_ck' \
+		--exclude-table='public.individual_copy_ihmp' \
+		--exclude-table='public.program_enrolment_ihmp' \
+		--exclude-table='public.individual_02_24' \
+		--exclude-table='public.program_enrolment_02_24'
+
+dump-metabase-prod:
+	pg_dump -h localhost -p 5433 \
+		--dbname=reportingdb \
+		--username=reporting_user \
+		--file=$(HOME)/projects/avni/avni-db-dumps/avni-metabase.sql \
+		--verbose --schema=public --host=localhost \
+		--exclude-table='public.query_execution' \
+		--exclude-table='public.view_log'
+
+restore-metabase-dump:
+ifndef dumpFile
+	@echo "Provde the dumpFile variable"
+	exit 1
+else
+	make _clean_db database=avni_metabase
+	-psql -p $(dbPort) -U ${su} -d postgres -c "create user reporting_user with password 'password' createrole";
+	-psql -p $(dbPort) -U ${su} -d postgres -c 'create database avni_metabase with owner reporting_user';
+	-psql -p $(dbPort) -U ${su} -d avni_metabase -c 'create extension if not exists "uuid-ossp"';
+	-psql -p $(dbPort) -U ${su} -d avni_metabase -c 'create extension if not exists "ltree"';
+	-psql -p $(dbPort) -U ${su} -d avni_metabase -c 'create extension if not exists "hstore"';
+	psql -U reporting_user -d avni_metabase < $(dumpFile)
+endif
+
+backup-org-db:
+ifndef orgDbUser
+	@echo "Provde the orgDbUser variable"
+	exit 1
+else
+	sudo -u $(su) pg_dump avni_org > ../avni-db-dumps/local-$(orgDbUser).sql
 endif

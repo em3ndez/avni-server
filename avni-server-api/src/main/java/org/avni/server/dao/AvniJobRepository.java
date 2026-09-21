@@ -1,7 +1,7 @@
 package org.avni.server.dao;
 
-import org.avni.server.domain.SubjectType;
 import org.avni.server.domain.User;
+import org.avni.server.domain.batch.BatchJobStatus;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
@@ -34,18 +34,18 @@ public class AvniJobRepository {
                 "       bje.create_time create_time,\n" +
                 "       bje.start_time start_time,\n" +
                 "       bje.end_time end_time,\n" +
-                "       string_agg(case when bjep.key_name = 'uuid' then bjep.string_val else '' end::text, '') uuid,\n" +
-                "       string_agg(case when bjep.key_name = 'fileName' then bjep.string_val else '' end::text, '') fileName,\n" +
-                "       sum(case when bjep.key_name = 'noOfLines' then bjep.long_val else 0 end) noOfLines,\n" +
-                "       string_agg(case when bjep.key_name = 's3Key' then bjep.string_val else '' end::text, '') s3Key,\n" +
-                "       sum(case when bjep.key_name = 'userId' then bjep.long_val else 0 end) userId,\n" +
-                "       string_agg(case when bjep.key_name = 'type' then bjep.string_val::text else '' end::text, '') job_type,\n" +
-                "       max(case when bjep.key_name = 'startDate' then bjep.date_val::timestamp else null::timestamp end::timestamp) startDate,\n" +
-                "       max(case when bjep.key_name = 'endDate' then bjep.date_val::timestamp else null::timestamp end::timestamp) endDate,\n" +
-                "       string_agg(case when bjep.key_name = 'subjectTypeUUID' then bjep.string_val::text else '' end::text, '') subjectTypeUUID,\n" +
-                "       string_agg(case when bjep.key_name = 'programUUID' then bjep.string_val::text else '' end::text, '') programUUID,\n" +
-                "       string_agg(case when bjep.key_name = 'encounterTypeUUID' then bjep.string_val::text else '' end::text, '') encounterTypeUUID,\n" +
-                "       string_agg(case when bjep.key_name = 'reportType' then bjep.string_val::text else '' end::text, '') reportType,\n" +
+                "       string_agg(case when bjep.parameter_name = 'uuid' then bjep.parameter_value else '' end::text, '') uuid,\n" +
+                "       string_agg(case when bjep.parameter_name = 'fileName' then bjep.parameter_value else '' end::text, '') fileName,\n" +
+                "       sum(case when bjep.parameter_name = 'noOfLines' then (case when bjep.parameter_value = '' then 0 else bjep.parameter_value::int end) else 0 end) noOfLines,\n" +
+                "       string_agg(case when bjep.parameter_name = 's3Key' then bjep.parameter_value else '' end::text, '') s3Key,\n" +
+                "       sum(case when bjep.parameter_name = 'userId' then (case when bjep.parameter_value = '' then 0 else bjep.parameter_value::int end) else 0 end) userId,\n" +
+                "       string_agg(case when bjep.parameter_name = 'type' then bjep.parameter_value::text else '' end::text, '') job_type,\n" +
+                "       max(case when bjep.parameter_name = 'startDate' then bjep.parameter_value::timestamp else null::timestamp end::timestamp) startDate,\n" +
+                "       max(case when bjep.parameter_name = 'endDate' then bjep.parameter_value::timestamp else null::timestamp end::timestamp) endDate,\n" +
+                "       string_agg(case when bjep.parameter_name = 'subjectTypeUUID' then bjep.parameter_value::text else '' end::text, '') subjectTypeUUID,\n" +
+                "       string_agg(case when bjep.parameter_name = 'programUUID' then bjep.parameter_value::text else '' end::text, '') programUUID,\n" +
+                "       string_agg(case when bjep.parameter_name = 'encounterTypeUUID' then bjep.parameter_value::text else '' end::text, '') encounterTypeUUID,\n" +
+                "       string_agg(case when bjep.parameter_name = 'reportType' then bjep.parameter_value::text else '' end::text, '') reportType,\n" +
                 "       max(bse.read_count) read_count,\n" +
                 "       max(bse.write_count) write_count,\n" +
                 "       max(bse.write_skip_count) write_skip_count\n" +
@@ -72,21 +72,26 @@ public class AvniJobRepository {
         return new PageImpl<>(jobStatuses, pageable, count);
     }
 
-    public String getLastJobStatusForSubjectType(SubjectType subjectType) {
-        String baseQuery = "select status\n" +
-                "from batch_job_instance i\n" +
-                "         left join batch_job_execution bje on i.job_instance_id = bje.job_instance_id\n" +
-                "         left join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id\n" +
-                "where i.job_name = 'syncAttributesJob'\n" +
-                "  and key_name = 'subjectTypeId'\n" +
-                "  and long_val = :subjectTypeId\n" +
-                "order by start_time desc\n" +
-                "limit 1;";
+    public BatchJobStatus getJobStatus(String jobName, String parameterName, String parameterValue) {
+        String baseQuery = """
+                                select bje.status, bje.create_time createDateTime, bje.start_time startDateTime, bje.end_time endDateTime, bje.exit_message exitMessage, bje.exit_code exitCode
+                                    from batch_job_instance i
+                                         left join batch_job_execution bje on i.job_instance_id = bje.job_instance_id
+                                         left join batch_job_execution_params bjep on bje.job_execution_id = bjep.job_execution_id
+                                where i.job_name = :jobName
+                                  and create_time is not null
+                                  and bjep.parameter_name = :parameterName and bjep.parameter_value = :parameterValue
+                                order by create_time desc
+                                limit 1;
+                """;
         Map<String, Object> params = new HashMap<>();
-        params.put("subjectTypeId", subjectType.getId());
-        List<String> statuses = jdbcTemplate.query(baseQuery, params, (rs, rowNum) -> rs.getString(1));
+        params.put("jobName", jobName);
+        params.put("parameterName", parameterName);
+        params.put("parameterValue", parameterValue);
+        List<BatchJobStatus> statuses = jdbcTemplate.query(baseQuery, params, (rs, rowNum) ->
+                new BatchJobStatus(rs.getString(1), rs.getTimestamp(2), rs.getTimestamp(3), rs.getTimestamp(4), rs.getString(5), rs.getString(6)));
         if (statuses.isEmpty()) {
-            return null;
+            return new BatchJobStatus("NOT_FOUND", null, null, null, null, null);
         }
         return statuses.get(0);
     }

@@ -1,41 +1,49 @@
-package org.avni.server.web;
+    package org.avni.server.web;
 
-import org.avni.server.dao.CatchmentRepository;
-import org.avni.server.dao.OrganisationRepository;
-import org.avni.server.dao.UserRepository;
-import org.avni.server.domain.*;
-import org.avni.server.domain.accessControl.GroupPrivilege;
-import org.avni.server.framework.security.UserContextHolder;
-import org.avni.server.service.*;
-import org.avni.server.service.accessControl.GroupPrivilegeService;
-import org.avni.server.web.request.GroupPrivilegeContract;
-import org.avni.server.web.request.UserBulkUploadContract;
-import org.avni.server.web.request.UserInfo;
-import org.avni.server.web.response.slice.SlicedResources;
-import org.joda.time.DateTime;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.domain.PageImpl;
-import org.springframework.data.domain.SliceImpl;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestMethod;
-import org.springframework.web.bind.annotation.RestController;
+    import org.springframework.transaction.annotation.Transactional;
+    import org.avni.server.dao.CatchmentRepository;
+    import org.avni.server.dao.OrganisationRepository;
+    import org.avni.server.dao.UserGroupRepository;
+    import org.avni.server.dao.UserRepository;
+    import org.avni.server.domain.*;
+    import org.avni.server.domain.accessControl.GroupPrivilege;
+    import org.avni.server.domain.accessControl.PrivilegeType;
+    import org.avni.server.framework.security.UserContextHolder;
+    import org.avni.server.service.IDPException;
+    import org.avni.server.service.IdpServiceFactory;
+    import org.avni.server.service.OrganisationConfigService;
+    import org.avni.server.service.UserService;
+    import org.avni.server.service.accessControl.AccessControlService;
+    import org.avni.server.service.accessControl.GroupPrivilegeService;
+    import org.avni.server.util.RegionUtil;
+    import org.avni.server.web.request.GroupPrivilegeContract;
+    import org.avni.server.web.request.UserBulkUploadContract;
+    import org.avni.server.web.request.UserInfoClientContract;
+    import org.avni.server.web.request.UserInfoContract;
+    import org.avni.server.web.request.rules.RulesContractWrapper.MyUserGroupContract;
+    import org.avni.server.web.response.slice.SlicedResources;
+    import org.joda.time.DateTime;
+    import org.slf4j.Logger;
+    import org.slf4j.LoggerFactory;
+    import org.springframework.beans.factory.annotation.Autowired;
+    import org.springframework.data.domain.PageImpl;
+    import org.springframework.data.domain.SliceImpl;
+    import org.springframework.hateoas.CollectionModel;
+    import org.springframework.hateoas.EntityModel;
+    import org.springframework.http.HttpStatus;
+    import org.springframework.http.ResponseEntity;
+    import org.springframework.web.bind.annotation.RequestBody;
+    import org.springframework.web.bind.annotation.RequestMapping;
+    import org.springframework.web.bind.annotation.RequestMethod;
+    import org.springframework.web.bind.annotation.RestController;
 
-import javax.transaction.Transactional;
-import java.util.Arrays;
-import java.util.List;
-import java.util.UUID;
-import java.util.stream.Collectors;
+    import java.util.Arrays;
+    import java.util.List;
+    import java.util.UUID;
+    import java.util.stream.Collectors;
 
 @RestController
-public class UserInfoController implements RestControllerResourceProcessor<UserInfo> {
+public class UserInfoController implements RestControllerResourceProcessor<UserInfoContract> {
     private final CatchmentRepository catchmentRepository;
     private final Logger logger;
     private final UserRepository userRepository;
@@ -44,10 +52,13 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
     private final IdpServiceFactory idpServiceFactory;
     private final OrganisationConfigService organisationConfigService;
     private final GroupPrivilegeService groupPrivilegeService;
+    private final AccessControlService accessControlService;
+    private final UserGroupRepository userGroupRepository;
 
     @Autowired
     public UserInfoController(CatchmentRepository catchmentRepository, UserRepository userRepository, OrganisationRepository organisationRepository, UserService userService,
-                              IdpServiceFactory idpServiceFactory, OrganisationConfigService organisationConfigService, GroupPrivilegeService groupPrivilegeService) {
+                              IdpServiceFactory idpServiceFactory, OrganisationConfigService organisationConfigService, GroupPrivilegeService groupPrivilegeService, AccessControlService accessControlService,
+                              UserGroupRepository userGroupRepository) {
         this.catchmentRepository = catchmentRepository;
         this.userRepository = userRepository;
         this.organisationRepository = organisationRepository;
@@ -55,26 +66,28 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
         this.idpServiceFactory = idpServiceFactory;
         this.organisationConfigService = organisationConfigService;
         this.groupPrivilegeService = groupPrivilegeService;
+        this.accessControlService = accessControlService;
+        this.userGroupRepository = userGroupRepository;
         logger = LoggerFactory.getLogger(this.getClass());
     }
 
     @RequestMapping(value = "/userInfo", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user', 'admin')")
-    public ResponseEntity<UserInfo> getUserInfo() {
+    @Transactional(readOnly = true)
+    public ResponseEntity<UserInfoContract> getUserInfo() {
         UserContext userContext = UserContextHolder.getUserContext();
         User user = userContext.getUser();
         Organisation organisation = userContext.getOrganisation();
+        boolean isAdmin = userService.isAdmin(user);
 
-        if (organisation == null && !user.isAdmin()) {
+        if (organisation == null && !isAdmin) {
             logger.info(String.format("Organisation not found for user ID: %s", user.getId()));
-            return new ResponseEntity<>(new UserInfo(), HttpStatus.NOT_FOUND);
+            return new ResponseEntity<>(new UserInfoClientContract(), HttpStatus.NOT_FOUND);
         }
-        if (user.isAdmin() && organisation == null) {
+        if (isAdmin && organisation == null) {
             organisation = new Organisation();
         }
         return new ResponseEntity<>(getUserInfoObject(organisation, user), HttpStatus.OK);
     }
-
 
     /**
      * @return
@@ -82,14 +95,14 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
      */
     @Deprecated
     @RequestMapping(value = "/me", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user', 'admin')")
-    public ResponseEntity<UserInfo> getMyProfileOld() {
+    @Transactional(readOnly = true)
+    public ResponseEntity<UserInfoContract> getMyProfileOld() {
         return getUserInfo();
     }
 
     @RequestMapping(value = "/v2/me", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user', 'admin')")
-    public PagedResources<Resource<UserInfo>> getMyProfile() {
+    @Transactional(readOnly = true)
+    public CollectionModel<EntityModel<UserInfoContract>> getMyProfile() {
         UserContext userContext = UserContextHolder.getUserContext();
         User user = userContext.getUser();
         Organisation organisation = userContext.getOrganisation();
@@ -98,8 +111,8 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
     }
 
     @RequestMapping(value = "/me/v3", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user', 'admin')")
-    public SlicedResources<Resource<UserInfo>> getMyProfileAsSlice() {
+    @Transactional(readOnly = true)
+    public SlicedResources<EntityModel<UserInfoContract>> getMyProfileAsSlice() {
         UserContext userContext = UserContextHolder.getUserContext();
         User user = userContext.getUser();
         Organisation organisation = userContext.getOrganisation();
@@ -107,32 +120,34 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
         return wrap(new SliceImpl<>(Arrays.asList(getUserInfoObject(organisation, user))));
     }
 
-    public UserInfo getUserInfoObject(Organisation organisation, User user) {
-        String usernameSuffix = organisation.getUsernameSuffix() != null
-                ? organisation.getUsernameSuffix() : organisation.getDbUser();
+    public UserInfoContract getUserInfoObject(Organisation organisation, User user) {
         String catchmentName = user.getCatchment() == null ? null : user.getCatchment().getName();
-        List<GroupPrivilege> groupPrivileges = groupPrivilegeService.getGroupPrivileges(user).getPrivileges();
+        List<GroupPrivilege> groupPrivileges = groupPrivilegeService.getExplicitGroupPrivileges(user).getPrivileges();
         List<GroupPrivilegeContract> groupPrivilegeContractList = groupPrivileges.stream()
                 .map(GroupPrivilegeContract::fromEntity)
                 .distinct()
                 .collect(Collectors.toList());
-        UserInfo userInfo = new UserInfo(user.getUsername(),
+        List<MyUserGroupContract> myUserGroups = userGroupRepository.findByUser_IdAndIsVoidedFalse(user.getId()).stream()
+                .map(MyUserGroupContract::fromEntity)
+                .collect(Collectors.toList());
+        UserInfoClientContract userInfoClientContract = new UserInfoClientContract(user.getUsername(),
                 organisation.getName(),
                 organisation.getId(),
-                usernameSuffix,
+                organisation.getEffectiveUsernameSuffix(),
                 user.getRoles(),
                 user.getSettings(),
                 user.getName(),
                 catchmentName,
                 user.getSyncSettings(),
                 groupPrivilegeContractList);
-        return userInfo;
+        userInfoClientContract.setUserUUID(user.getUuid());
+        userInfoClientContract.setMyUserGroups(myUserGroups);
+        return userInfoClientContract;
     }
 
     @RequestMapping(value = "/me", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('user')")
-    public void saveMyProfile(@RequestBody UserInfo userInfo) {
+    public void saveMyProfile(@RequestBody UserInfoContract userInfo) {
         User user = userService.getCurrentUser();
         user.setSettings(userInfo.getSettings());
         user.setLastModifiedBy(user);
@@ -142,8 +157,8 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
 
     @RequestMapping(value = "/users", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     public void save(@RequestBody UserBulkUploadContract[] userContracts) {
+        accessControlService.checkPrivilege(PrivilegeType.EditUserConfiguration);
         Arrays.stream(userContracts).forEach(userContract -> {
             logger.info(String.format("Saving user with UUID/Name %s/%s", userContract.getUuid(), userContract.getName()));
             User user = userContract.getUuid() == null ? userRepository.findByUsername(userContract.getName()) : userRepository.findByUuid(userContract.getUuid());
@@ -152,6 +167,7 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
                 user = new User();
                 user.setUuid(userContract.getUuid() == null ? UUID.randomUUID().toString() : userContract.getUuid());
                 user.setUsername(userContract.getName());
+                user.setLastActivatedDateTime(new DateTime());
                 newUser = true;
             }
             Catchment catchment = userContract.getCatchmentUUID() == null ? catchmentRepository.findOne(userContract.getCatchmentId()) : catchmentRepository.findByUuid(userContract.getCatchmentUUID());
@@ -159,17 +175,22 @@ public class UserInfoController implements RestControllerResourceProcessor<UserI
 
             Long organisationId = getOrganisationId(userContract);
             user.setOrganisationId(organisationId);
-            user.setOrgAdmin(userContract.isOrgAdmin());
             user.setOperatingIndividualScope(OperatingIndividualScope.valueOf(userContract.getOperatingIndividualScope()));
             user.setSettings(userContract.getSettings());
-            user.setPhoneNumber(userContract.getPhoneNumber());
+            userService.setPhoneNumber(userContract.getPhoneNumber(), user, RegionUtil.getCurrentUserRegion());
             user.setEmail(userContract.getEmail());
+            user.setDisabledInCognito(false);
             user.setAuditInfo(userService.getCurrentUser());
             User savedUser = userService.save(user);
-            if (newUser) userService.addToDefaultUserGroup(user);
+            if (newUser) userService.addToDefaultUserGroup(savedUser);
             logger.info(String.format("Saved User with UUID %s", userContract.getUuid()));
-            OrganisationConfig organisationConfig = organisationConfigService.getOrganisationConfig(UserContextHolder.getOrganisation());
-            idpServiceFactory.getIdpService(organisationRepository.findOne(organisationId)).createUserIfNotExists(savedUser, organisationConfig);
+            OrganisationConfig organisationConfig = organisationConfigService.getOrganisationConfigByOrgId(organisationId);
+            try {
+                idpServiceFactory.getIdpService(organisationRepository.findOne(organisationId)).createUserIfNotExists(savedUser, organisationConfig);
+            } catch (IDPException e) {
+                logger.error(String.format("Error creating user with UUID %s.", userContract.getUuid()), e);
+                throw new RuntimeException(e);
+            }
         });
     }
 

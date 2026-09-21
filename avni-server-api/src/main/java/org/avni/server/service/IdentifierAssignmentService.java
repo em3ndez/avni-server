@@ -1,6 +1,7 @@
 package org.avni.server.service;
 
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.application.Form;
 import org.avni.server.application.KeyType;
 import org.avni.server.dao.IdentifierAssignmentRepository;
@@ -11,17 +12,16 @@ import org.avni.server.domain.IdentifierSource;
 import org.avni.server.domain.User;
 import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.identifier.IdentifierGenerator;
+import org.joda.time.DateTime;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Service;
 
-import javax.transaction.Transactional;
-import org.joda.time.DateTime;
 import java.util.List;
 import java.util.stream.Collectors;
 
 @Service
-public class IdentifierAssignmentService implements NonScopeAwareService {
+public class IdentifierAssignmentService implements DeviceAwareService {
 
     private IdentifierSourceRepository identifierSourceRepository;
 
@@ -38,42 +38,41 @@ public class IdentifierAssignmentService implements NonScopeAwareService {
 
 
     @Transactional
-    public void generateIdentifiersIfNecessary(User user) {
+    public void generateIdentifiersIfNecessary(User user, String deviceId) {
         List<IdentifierSource> allAuthorisedIdentifierSources = identifierSourceRepository.getAllAuthorisedIdentifierSources(user.getCatchment());
         for (IdentifierSource identifierSource : allAuthorisedIdentifierSources) {
-            generateIdentifiersIfNecessary(user, identifierSource);
+            generateIdentifiersIfNecessary(user, identifierSource, deviceId);
         }
     }
 
     @Transactional
-    public void generateIdentifiersIfNecessary(User user, IdentifierSource identifierSource) {
-        if (shouldGenerateIdentifiers(user, identifierSource)) {
-            IdentifierGenerator identifierGenerator = context.getBean(identifierSource.getType(), IdentifierGenerator.class);
-            identifierGenerator.generateIdentifiers(identifierSource, user);
+    public void generateIdentifiersIfNecessary(User user, IdentifierSource identifierSource, String deviceId) {
+        if (shouldGenerateIdentifiers(user, identifierSource, deviceId)) {
+            IdentifierGenerator identifierGenerator = context.getBean(identifierSource.getType().name(), IdentifierGenerator.class);
+            identifierGenerator.generateIdentifiers(identifierSource, user, deviceId);
         }
     }
 
     @Transactional
     public List<IdentifierAssignment> generateIdentifiersForAForm(Form form, User user) {
-        return form.getAllFormElements().stream()
+        return form.getApplicableFormElements().stream()
                 .filter(formElement -> formElement.getKeyValues().containsKey(KeyType.IdSourceUUID))
                 .map(formElement -> {
                     String idSourceUuid = (String) formElement.getKeyValues().getKeyValue(KeyType.IdSourceUUID).getValue();
                     IdentifierSource identifierSource = identifierSourceRepository.findByUuid(idSourceUuid);
-                    IdentifierGenerator identifierGenerator = context.getBean(identifierSource.getType(), IdentifierGenerator.class);
+                    IdentifierGenerator identifierGenerator = context.getBean(identifierSource.getType().name(), IdentifierGenerator.class);
                     return identifierGenerator.generateSingleIdentifier(identifierSource, user);
                 }).collect(Collectors.toList());
     }
 
-    private boolean shouldGenerateIdentifiers(User user, IdentifierSource identifierSource) {
-        Integer spareIdentifierAssignments = identifierAssignmentRepository.countIdentifierAssignmentByIdentifierSourceEqualsAndAndAssignedToEqualsAndIndividualIsNullAndProgramEnrolmentIsNull(identifierSource, user);
+    private boolean shouldGenerateIdentifiers(User user, IdentifierSource identifierSource, String deviceId) {
+        Integer spareIdentifierAssignments = identifierAssignmentRepository.countIdentifierAssignmentByIdentifierSourceEqualsAndAssignedToEqualsAndIndividualIsNullAndProgramEnrolmentIsNullAndUsedIsFalseAndDeviceIdEquals(identifierSource, user, deviceId);
         return spareIdentifierAssignments < identifierSource.getMinimumBalance();
     }
 
     @Override
-    public boolean isNonScopeEntityChanged(DateTime lastModifiedDateTime) {
+    public boolean isSyncRequiredForDevice(DateTime lastModifiedDateTime, String deviceId) {
         User user = UserContextHolder.getUserContext().getUser();
-        this.generateIdentifiersIfNecessary(user);
-        return identifierAssignmentRepository.existsByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNull(user, CHSEntity.toDate(lastModifiedDateTime));
-    }
+        this.generateIdentifiersIfNecessary(user, deviceId);
+        return identifierAssignmentRepository.existsByAssignedToAndLastModifiedDateTimeGreaterThanAndIsVoidedFalseAndIndividualIsNullAndProgramEnrolmentIsNullAndDeviceIdEquals(user, CHSEntity.toDate(lastModifiedDateTime), deviceId);    }
 }

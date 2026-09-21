@@ -4,8 +4,16 @@ import org.avni.messaging.contract.glific.GlificContactResponse;
 import org.avni.messaging.contract.glific.GlificOptinContactResponse;
 import org.avni.messaging.contract.glific.GlificGetContactsResponse;
 import org.avni.messaging.contract.glific.GlificOptinContactWithErrorsResponse;
+import org.avni.messaging.domain.exception.GlificNotConfiguredException;
 import org.avni.messaging.external.GlificRestClient;
 import org.avni.messaging.service.PhoneNumberNotAvailableOrIncorrectException;
+import org.avni.server.domain.Account;
+import org.avni.server.domain.Organisation;
+import org.avni.server.domain.UserContext;
+import org.avni.server.domain.factory.TestAccountBuilder;
+import org.avni.server.domain.factory.TestOrganisationBuilder;
+import org.avni.server.domain.factory.UserContextBuilder;
+import org.avni.server.framework.security.UserContextHolder;
 import org.junit.Test;
 
 import java.util.ArrayList;
@@ -16,7 +24,12 @@ import static org.mockito.Mockito.*;
 
 public class GlificContactRepositoryTest {
     @Test
-    public void shouldCreateContactIfNotAvailable() throws PhoneNumberNotAvailableOrIncorrectException {
+    public void shouldCreateContactIfNotAvailable() throws PhoneNumberNotAvailableOrIncorrectException, GlificNotConfiguredException {
+        Account account = new TestAccountBuilder().withRegion("IN").build();
+        Organisation organisation = new TestOrganisationBuilder().withAccount(account).build();
+        UserContext userContext = new UserContextBuilder().withOrganisation(organisation).build();
+        UserContextHolder.create(userContext);
+
         GlificRestClient glificRestClient = mock(GlificRestClient.class);
         GlificContactRepository repository = new GlificContactRepository(glificRestClient);
         GlificGetContactsResponse getContactsResponse = new GlificGetContactsResponse();

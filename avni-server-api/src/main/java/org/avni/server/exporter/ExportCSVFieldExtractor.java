@@ -20,7 +20,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
-import javax.annotation.PostConstruct;
+import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.io.Writer;
 import java.util.*;
@@ -181,6 +181,7 @@ public class ExportCSVFieldExtractor implements FieldExtractor<ExportItemRow>, F
         headers.append(",").append("ind.date_of_birth");
         headers.append(",").append("ind.registration_date");
         headers.append(",").append("ind.registration_location");
+        headers.append(",").append("ind.subject_location");
         headers.append(",").append("ind.gender");
         addAddressLevelColumns(headers);
         if(subjectType.isGroup()) {
@@ -241,6 +242,7 @@ public class ExportCSVFieldExtractor implements FieldExtractor<ExportItemRow>, F
             row.add(individual.getDateOfBirth());
             row.add(individual.getRegistrationDate());
             row.add(individual.getRegistrationLocation());
+            row.add(individual.getSubjectLocation());
             row.add(gender == null ? "" : gender.getName());
             addAddressLevels(row, addressLevel);
             if (subjectType.isGroup()) {
@@ -350,7 +352,7 @@ public class ExportCSVFieldExtractor implements FieldExtractor<ExportItemRow>, F
 
     private void appendObsColumns(StringBuilder sb, String prefix, LinkedHashMap<String, FormElement> map) {
         map.forEach((uuid, fe) -> {
-            if (ConceptDataType.isGroupQuestion(fe.getConcept().getDataType())) return;
+            if (ConceptDataType.isQuestionGroup(fe.getConcept().getDataType())) return;
             Concept concept = fe.getConcept();
             String groupPrefix = fe.getGroup() != null ? fe.getGroup().getConcept().getName() + "_" : "";
             if (concept.getDataType().equals(ConceptDataType.Coded.toString()) && fe.getType().equals(FormElementType.MultiSelect.toString())) {
@@ -376,7 +378,7 @@ public class ExportCSVFieldExtractor implements FieldExtractor<ExportItemRow>, F
     private List<Object> getObs(ObservationCollection observations, LinkedHashMap<String, FormElement> obsMap) {
         List<Object> values = new ArrayList<>(obsMap.size());
         obsMap.forEach((conceptUUID, formElement) -> {
-            if (ConceptDataType.isGroupQuestion(formElement.getConcept().getDataType())) return;
+            if (ConceptDataType.isQuestionGroup(formElement.getConcept().getDataType())) return;
             Object val;
             if (formElement.getGroup() != null) {
                 Concept parentConcept = formElement.getGroup().getConcept();

@@ -1,6 +1,8 @@
 package org.avni.server.service;
 
+import com.amazonaws.services.cognitoidp.model.AuthenticationResultType;
 import com.auth0.jwt.interfaces.Verification;
+import org.avni.server.auth.AuthenticationHelper;
 import org.avni.server.config.CognitoConfig;
 import org.avni.server.dao.UserRepository;
 import org.slf4j.Logger;
@@ -12,7 +14,7 @@ import org.springframework.stereotype.Service;
 @Service
 @ConditionalOnExpression("'${avni.idp.type}'=='cognito' or '${avni.idp.type}'=='both'")
 public class CognitoAuthServiceImpl extends BaseIAMService {
-    private static final String COGNITO_URL = "https://cognito-idp.ap-south-1.amazonaws.com/";
+
     private final Logger logger = LoggerFactory.getLogger(CognitoAuthServiceImpl.class);
 
     private final CognitoConfig cognitoConfig;
@@ -25,8 +27,16 @@ public class CognitoAuthServiceImpl extends BaseIAMService {
 
     public void logConfiguration() {
         logger.debug("Cognito configuration");
+        logger.debug(String.format("Region: %s", cognitoConfig.getRegion()));
         logger.debug(String.format("Pool Id: %s", cognitoConfig.getPoolId()));
         logger.debug(String.format("Client Id: %s", cognitoConfig.getClientId()));
+    }
+
+    @Override
+    public String generateTokenForUser(String username, String password) {
+        AuthenticationHelper helper = new AuthenticationHelper(cognitoConfig.getPoolId(), cognitoConfig.getClientId());
+        AuthenticationResultType authenticationResultType = helper.performSRPAuthentication(username, password);
+        return authenticationResultType.getIdToken();
     }
 
     protected String getJwkProviderUrl() {
@@ -34,7 +44,7 @@ public class CognitoAuthServiceImpl extends BaseIAMService {
     }
 
     protected String getIssuer() {
-        return COGNITO_URL + cognitoConfig.getPoolId();
+        return getCognitoUrl() + cognitoConfig.getPoolId();
     }
 
     @Override
@@ -55,5 +65,9 @@ public class CognitoAuthServiceImpl extends BaseIAMService {
     @Override
     protected String getAudience() {
         return cognitoConfig.getClientId();
+    }
+
+    private String getCognitoUrl() {
+        return String.format("https://cognito-idp.%s.amazonaws.com/", cognitoConfig.getRegion());
     }
 }

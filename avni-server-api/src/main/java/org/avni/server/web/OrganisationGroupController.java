@@ -9,49 +9,54 @@ import org.avni.server.domain.OrganisationGroup;
 import org.avni.server.domain.OrganisationGroupOrganisation;
 import org.avni.server.domain.User;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.util.ReactAdminUtil;
 import org.avni.server.web.validation.ValidationException;
 import org.avni.server.web.request.OrganisationGroupContract;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import java.util.HashSet;
 import java.util.Set;
 
 @RestController
 public class OrganisationGroupController implements RestControllerResourceProcessor<OrganisationGroup> {
+
+    @Value("${avni.default.org.user.db.password}")
+    private String AVNI_DEFAULT_ORG_USER_DB_PASSWORD;
     private final Logger logger;
     private final OrganisationGroupRepository organisationGroupRepository;
     private final OrganisationRepository organisationRepository;
     private final AccountRepository accountRepository;
     private final ImplementationRepository implementationRepository;
+    private final AccessControlService accessControlService;
 
     public OrganisationGroupController(OrganisationGroupRepository organisationGroupRepository,
                                        OrganisationRepository organisationRepository,
-                                       AccountRepository accountRepository, ImplementationRepository implementationRepository) {
+                                       AccountRepository accountRepository, ImplementationRepository implementationRepository, AccessControlService accessControlService) {
         this.organisationGroupRepository = organisationGroupRepository;
         this.organisationRepository = organisationRepository;
         this.accountRepository = accountRepository;
         this.implementationRepository = implementationRepository;
+        this.accessControlService = accessControlService;
         logger = LoggerFactory.getLogger(this.getClass());
     }
 
     @RequestMapping(value = "/organisationGroup", method = RequestMethod.POST)
-    @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(rollbackFor = Exception.class)
     public ResponseEntity save(@RequestBody OrganisationGroupContract request) throws Exception {
+        accessControlService.assertIsSuperAdmin();
         if (organisationGroupRepository.findByName(request.getName()) != null) {
             throw new ValidationException(String.format("Organisation group %s already exists", request.getName()));
         }
-        String tempPassword = "password";
-        implementationRepository.createDBUser(request.getDbUser(), tempPassword);
+        implementationRepository.createDBUser(request.getDbUser(), AVNI_DEFAULT_ORG_USER_DB_PASSWORD);
         OrganisationGroup organisationGroup = new OrganisationGroup();
         organisationGroup.setDbUser(request.getDbUser());
         organisationGroup.assignUUIDIfRequired();
@@ -60,9 +65,9 @@ public class OrganisationGroupController implements RestControllerResourceProces
     }
 
     @RequestMapping(value = "/organisationGroup/{id}", method = RequestMethod.PUT)
-    @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(rollbackFor = Exception.class)
     public ResponseEntity<?> updateOrganisationGroup(@PathVariable("id") Long id, @RequestBody OrganisationGroupContract request) throws Exception {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         OrganisationGroup organisationGroup = organisationGroupRepository.findByIdAndAccount_AccountAdmin_User_Id(id, user.getId());;
         //disable changing dbUser
@@ -71,16 +76,18 @@ public class OrganisationGroupController implements RestControllerResourceProces
     }
 
     @RequestMapping(value = "/organisationGroup", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     public Page<OrganisationGroupContract> get(Pageable pageable) {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         Page<OrganisationGroup> organisationGroups = organisationGroupRepository.findByAccount_AccountAdmin_User_Id(user.getId(), pageable);
         return organisationGroups.map(OrganisationGroupContract::fromEntity);
     }
 
     @RequestMapping(value = "/organisationGroup/{id}", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
+    @Transactional(readOnly = true)
     public OrganisationGroupContract getById(@PathVariable Long id) {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         OrganisationGroup organisationGroup = organisationGroupRepository.findByIdAndAccount_AccountAdmin_User_Id(id, user.getId());
         return OrganisationGroupContract.fromEntity(organisationGroup);
@@ -88,8 +95,8 @@ public class OrganisationGroupController implements RestControllerResourceProces
 
     @RequestMapping(value = "/organisationGroup/{id}", method = RequestMethod.DELETE)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin')")
     public ResponseEntity<?> deleteById(@PathVariable Long id) {
+        accessControlService.assertIsSuperAdmin();
         User user = UserContextHolder.getUserContext().getUser();
         OrganisationGroup organisationGroup = organisationGroupRepository.findByIdAndAccount_AccountAdmin_User_Id(id, user.getId());
         if (organisationGroup == null) {

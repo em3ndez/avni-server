@@ -2,12 +2,12 @@ package org.avni.server.framework.security;
 
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.avni.server.web.LogoutController;
 import org.springframework.util.StringUtils;
 
-import javax.servlet.http.Cookie;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.regex.Pattern;
@@ -48,7 +48,7 @@ public class AuthTokenManager {
     private int getCookieMaxAge(String authToken) {
         DecodedJWT jwt = JWT.decode(authToken);
         int expiryDuration = (int) ((jwt.getExpiresAt().getTime() - new Date().getTime()) / 1000) - 60;
-        return expiryDuration < 0 ? 0 : expiryDuration;
+        return Math.max(expiryDuration, 0);
     }
 
     private Cookie makeCookie(String value, int age) {

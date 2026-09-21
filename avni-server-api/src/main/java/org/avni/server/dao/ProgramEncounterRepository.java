@@ -1,9 +1,8 @@
 package org.avni.server.dao;
 
-import org.avni.server.domain.Concept;
-import org.avni.server.domain.EncounterType;
-import org.avni.server.domain.ProgramEncounter;
-import org.avni.server.domain.ProgramEnrolment;
+import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.util.DateTimeUtil;
 import org.joda.time.DateTime;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -15,7 +14,8 @@ import org.springframework.data.rest.core.annotation.RepositoryRestResource;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Repository;
 
-import javax.persistence.criteria.*;
+import jakarta.persistence.criteria.*;
+
 import java.util.Date;
 import java.util.Calendar;
 import java.util.List;
@@ -25,8 +25,7 @@ import static org.springframework.data.jpa.domain.Specification.where;
 
 @Repository
 @RepositoryRestResource(collectionResourceRel = "programEncounter", path = "programEncounter", exported = false)
-@PreAuthorize("hasAnyAuthority('user','admin')")
-public interface ProgramEncounterRepository extends TransactionalDataRepository<ProgramEncounter>, FindByLastModifiedDateTime<ProgramEncounter>, OperatingIndividualScopeAwareRepository<ProgramEncounter> {
+public interface ProgramEncounterRepository extends TransactionalDataRepository<ProgramEncounter>, FindByLastModifiedDateTime<ProgramEncounter>, OperatingIndividualScopeAwareRepository<ProgramEncounter>, SubjectTreeItemRepository {
 
     Page<ProgramEncounter> findByProgramEnrolmentIndividualAddressLevelVirtualCatchmentsIdAndLastModifiedDateTimeIsBetweenOrderByLastModifiedDateTimeAscIdAsc(
             long catchmentId, Date lastModifiedDateTime, Date now, Pageable pageable);
@@ -38,10 +37,11 @@ public interface ProgramEncounterRepository extends TransactionalDataRepository<
     }
 
     @Override
-    default boolean isEntityChangedForCatchment(SyncParameters syncParameters){
+    default boolean isEntityChanged(SyncParameters syncParameters){
         return count(syncEntityChangedAuditSpecification(syncParameters)
                 .and(syncTypeIdSpecification(syncParameters.getTypeId()))
                 .and(syncStrategySpecification(syncParameters))
+                .and(syncDisabledSpecification())
         ) > 0;
     }
 
@@ -105,6 +105,15 @@ public interface ProgramEncounterRepository extends TransactionalDataRepository<
         return (Root<ProgramEncounter> root, CriteriaQuery<?> query, CriteriaBuilder cb) -> cb.isNotNull(root.get("cancelDateTime"));
     }
 
+    default Specification<ProgramEncounter> orderByVisitDateDescIdDesc() {
+        return (Root<ProgramEncounter> root, CriteriaQuery<?> query, CriteriaBuilder cb) -> {
+            query.orderBy(
+                    cb.desc(cb.coalesce(cb.coalesce(root.get("earliestVisitDateTime"), root.get("encounterDateTime")), root.get("cancelDateTime"))),
+                    cb.desc(root.get("id")));
+            return cb.conjunction();
+        };
+    }
+
     default Specification<ProgramEncounter> withProgramEncounterTypeIdUuids(List<String> encounterTypeUuids) {
         return (Root<ProgramEncounter> root, CriteriaQuery<?> query, CriteriaBuilder cb) ->
                 encounterTypeUuids.isEmpty() ? null : root.get("encounterType").get("uuid").in(encounterTypeUuids);
@@ -125,24 +134,35 @@ public interface ProgramEncounterRepository extends TransactionalDataRepository<
         return findAll(where(lastModifiedBetween(searchParams.lastModifiedDateTime, searchParams.now))
                 .and(withConceptValues(searchParams.concepts, "observations"))
                 .and(withEncounterType(searchParams.encounterType))
-                .and(withProgramEnrolment(searchParams.programEnrolment)), pageable);
+                .and(withProgramEnrolment(searchParams.programEnrolment))
+                .and(inCurrentOrganisation()), pageable);
     }
 
     @Modifying(clearAutomatically = true)
     @Query(value = "update program_encounter enc set " +
             "address_id = :addressId, " +
             "sync_concept_1_value = :syncAttribute1Value, " +
-            "sync_concept_2_value = :syncAttribute2Value " +
+            "sync_concept_2_value = :syncAttribute2Value, " +
+            "last_modified_date_time = (current_timestamp + enc.id * (interval '1 millisecond')/1000), last_modified_by_id = :lastModifiedById " +
             "where enc.individual_id = :individualId", nativeQuery = true)
-    void updateSyncAttributes(Long individualId, Long addressId, String syncAttribute1Value, String syncAttribute2Value);
+    void updateSyncAttributes(Long individualId, Long addressId, String syncAttribute1Value, String syncAttribute2Value, Long lastModifiedById);
+
+    default void updateSyncAttributes(Long individualId, Long addressId, String syncAttribute1Value, String syncAttribute2Value) {
+        this.updateSyncAttributes(individualId, addressId, syncAttribute1Value, syncAttribute2Value, UserContextHolder.getUserId());
+    }
 
     @Modifying(clearAutomatically = true)
     @Query(value = "update program_encounter enc set " +
             "sync_concept_1_value = CAST((i.observations ->> CAST(:syncAttribute1 as text)) as text), " +
-            "sync_concept_2_value = CAST((i.observations ->> CAST(:syncAttribute2 as text)) as text) " +
+            "sync_concept_2_value = CAST((i.observations ->> CAST(:syncAttribute2 as text)) as text), " +
+            "last_modified_date_time = (current_timestamp + enc.id * (interval '1 millisecond')/1000), last_modified_by_id = :lastModifiedById " +
             "from individual i " +
             "where enc.individual_id = i.id and i.subject_type_id = :subjectTypeId", nativeQuery = true)
-    void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2);
+    void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2, Long lastModifiedById);
+
+    default void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2) {
+        this.updateConceptSyncAttributesForSubjectType(subjectTypeId, syncAttribute1, syncAttribute2, UserContextHolder.getUserId());
+    }
 
     class SearchParams {
         public Date lastModifiedDateTime;
@@ -165,5 +185,14 @@ public interface ProgramEncounterRepository extends TransactionalDataRepository<
             this.encounterType = encounterType;
             this.programEnrolment = programEnrolment;
         }
+    }
+
+    @Modifying
+    @Query(value = "update program_encounter e set is_voided = true, last_modified_date_time = (current_timestamp + random() * 5000 * (interval '1 millisecond')), last_modified_by_id = :lastModifiedById " +
+            "from individual i, program_enrolment enrolment" +
+            " where i.id = enrolment.individual_id and i.address_id = :addressId and enrolment.id = e.program_enrolment_id and e.is_voided = false", nativeQuery = true)
+    void voidSubjectItemsAt(Long addressId, Long lastModifiedById);
+    default void voidSubjectItemsAt(AddressLevel address) {
+        this.voidSubjectItemsAt(address.getId(), UserContextHolder.getUserId());
     }
 }

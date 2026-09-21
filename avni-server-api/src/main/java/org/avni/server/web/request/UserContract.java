@@ -1,13 +1,15 @@
 package org.avni.server.web.request;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import org.avni.server.domain.OperatingIndividualScope;
 import org.avni.server.domain.JsonObject;
+import org.avni.server.domain.OperatingIndividualScope;
 import org.avni.server.domain.User;
 import org.joda.time.DateTime;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class UserContract extends ReferenceDataContract {
@@ -15,20 +17,23 @@ public class UserContract extends ReferenceDataContract {
     private Long catchmentId;
     private String phoneNumber;
     private String email;
-    private boolean orgAdmin = false;
-    private boolean admin = false;
+    private boolean admin;
     private String operatingIndividualScope = OperatingIndividualScope.None.toString();
     private JsonObject settings;
     private Long organisationId;
     private List<Long> accountIds;
     private boolean disabledInCognito;
-    private String[] roles;
+    private boolean ignoreSyncSettingsInDEA;
     private String password;
     private JsonObject syncSettings;
     private String createdBy;
     private String lastModifiedBy;
     private DateTime lastModifiedDateTime;
+    private DateTime lastActivatedDateTime;
     private DateTime createdDateTime;
+    private List<Long> groupIds;
+    private List<String> userGroupNames;
+    private String region;
 
     public static UserContract fromEntity(User user) {
         UserContract userContract = new UserContract();
@@ -39,23 +44,21 @@ public class UserContract extends ReferenceDataContract {
         userContract.setPhoneNumber(user.getPhoneNumber());
         userContract.setOrganisationId(user.getOrganisationId());
         userContract.setDisabledInCognito(user.isDisabledInCognito());
-        userContract.setOrgAdmin(user.isOrgAdmin());
-        userContract.setRoles(user.getRoles());
+        userContract.setIgnoreSyncSettingsInDEA(user.isIgnoreSyncSettingsInDEA());
         userContract.setCatchmentId(user.getCatchmentId().orElse(null));
         userContract.setSettings(user.getSettings());
         userContract.setCreatedBy(user.getCreatedByUserName());
-        userContract.setCreatedDateTime(user.getCreatedDateTime());
+        userContract.setCreatedDateTime(user.getCreatedDateTime().toDateTime());
         userContract.setLastModifiedBy(user.getLastModifiedByUserName());
-        userContract.setLastModifiedDateTime(user.getLastModifiedDateTime());
+        userContract.setLastModifiedDateTime(user.getLastModifiedDateTime().toDateTime());
+        if (!user.isDisabledInCognito() && Objects.nonNull(user.getLastActivatedDateTime())) {
+            userContract.setLastActivatedDateTime(user.getLastActivatedDateTime().toDateTime());
+        }
+        userContract.setGroupIds(user.getUserGroups().stream()
+                .map(userGroup -> userGroup.getGroupId()).collect(Collectors.toList()));
+        userContract.setUserGroupNames(user.getUserGroups().stream()
+                .map(userGroup -> userGroup.getGroupName()).collect(Collectors.toList()));
         return userContract;
-    }
-
-    public String[] getRoles() {
-        return roles;
-    }
-
-    public void setRoles(String[] roles) {
-        this.roles = roles;
     }
 
     public boolean isDisabledInCognito() {
@@ -64,6 +67,14 @@ public class UserContract extends ReferenceDataContract {
 
     public void setDisabledInCognito(boolean disabledInCognito) {
         this.disabledInCognito = disabledInCognito;
+    }
+
+    public boolean isIgnoreSyncSettingsInDEA() {
+        return ignoreSyncSettingsInDEA;
+    }
+
+    public void setIgnoreSyncSettingsInDEA(boolean ignoreSyncSettingsInDEA) {
+        this.ignoreSyncSettingsInDEA = ignoreSyncSettingsInDEA;
     }
 
     public Long getOrganisationId() {
@@ -79,7 +90,7 @@ public class UserContract extends ReferenceDataContract {
     }
 
     public void setUsername(String username) {
-        this.username = username;
+        this.username = username != null ? username.trim() : null;
     }
 
     public Long getCatchmentId() {
@@ -104,14 +115,6 @@ public class UserContract extends ReferenceDataContract {
 
     public void setEmail(String email) {
         this.email = email;
-    }
-
-    public boolean isOrgAdmin() {
-        return orgAdmin;
-    }
-
-    public void setOrgAdmin(boolean orgAdmin) {
-        this.orgAdmin = orgAdmin;
     }
 
     public boolean isAdmin() {
@@ -186,6 +189,14 @@ public class UserContract extends ReferenceDataContract {
         this.lastModifiedDateTime = lastModifiedDateTime;
     }
 
+    public DateTime getLastActivatedDateTime() {
+        return lastActivatedDateTime;
+    }
+
+    public void setLastActivatedDateTime(DateTime lastActivatedDateTime) {
+        this.lastActivatedDateTime = lastActivatedDateTime;
+    }
+
     public DateTime getCreatedDateTime() {
         return createdDateTime;
     }
@@ -193,4 +204,29 @@ public class UserContract extends ReferenceDataContract {
     public void setCreatedDateTime(DateTime createdDateTime) {
         this.createdDateTime = createdDateTime;
     }
+
+    public List<Long> getGroupIds() {
+        return groupIds;
+    }
+
+    public void setGroupIds(List<Long> groupIds) {
+        this.groupIds = groupIds;
+    }
+
+    public List<String> getUserGroupNames() {
+        return userGroupNames;
+    }
+
+    public void setUserGroupNames(List<String> userGroupNames) {
+        this.userGroupNames = userGroupNames;
+    }
+
+    public String getRegion() {
+        return region;
+    }
+
+    public void setRegion(String region) {
+        this.region = region;
+    }
+
 }

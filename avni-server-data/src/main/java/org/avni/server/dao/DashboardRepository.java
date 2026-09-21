@@ -1,0 +1,20 @@
+package org.avni.server.dao;
+
+import org.avni.server.domain.Dashboard;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.rest.core.annotation.RepositoryRestResource;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+
+@Repository
+@RepositoryRestResource(collectionResourceRel = "dashboard", path = "dashboard")
+public interface DashboardRepository extends ReferenceDataRepository<Dashboard>, JpaSpecificationExecutor<Dashboard>, EndOfLife1EndpointRepository<Dashboard> {
+    @Query("select d.name from Dashboard d where d.isVoided = false")
+    List<String> getAllNames();
+
+    List<Dashboard> findAllByIsVoidedFalseOrderByName();
+
+    Dashboard findByUuidAndOrganisationIdAndIsVoidedFalse(String uuid, Long organisationId);
+}

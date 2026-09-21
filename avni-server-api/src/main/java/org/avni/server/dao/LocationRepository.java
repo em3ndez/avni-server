@@ -1,20 +1,24 @@
 package org.avni.server.dao;
 
+import jakarta.persistence.QueryHint;
+import jakarta.validation.constraints.NotNull;
+import org.avni.server.application.projections.CatchmentAddressProjection;
 import org.avni.server.application.projections.LocationProjection;
-import org.avni.server.application.projections.VirtualCatchmentProjection;
 import org.avni.server.domain.AddressLevel;
 import org.avni.server.domain.AddressLevelType;
 import org.avni.server.domain.Catchment;
+import org.avni.server.framework.security.UserContextHolder;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
 import org.springframework.data.rest.core.annotation.RestResource;
 import org.springframework.stereotype.Repository;
 import org.springframework.util.StringUtils;
 
-import javax.validation.constraints.NotNull;
 import java.util.Collection;
 import java.util.Date;
 import java.util.List;
@@ -25,10 +29,9 @@ import java.util.Optional;
 public interface LocationRepository extends ReferenceDataRepository<AddressLevel>, FindByLastModifiedDateTime<AddressLevel>, OperatingIndividualScopeAwareRepository<AddressLevel> {
 
     @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
+            "cast(lineage as text) as lineage, alt.level " +
             "from address_level al " +
             "left join address_level_type alt on alt.id = al.type_id " +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
             "where al.id in (:ids)",
             nativeQuery = true)
     List<LocationProjection> findByIdIn(Long[] ids);
@@ -39,9 +42,10 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
             "         inner join address_level al on cam.addresslevel_id = al.id\n" +
             "         inner join address_level al1 on al.lineage @> al1.lineage \n" +
             "where c.id = :catchmentId\n" +
+            "  and c.organisation_id = :organisationId\n" +
             "  and al1.last_modified_date_time between :lastModifiedDateTime and :now\n" +
             "order by al1.last_modified_date_time asc, al1.id asc", nativeQuery = true)
-    Page<AddressLevel> getSyncResults(long catchmentId, Date lastModifiedDateTime, Date now, Pageable pageable);
+    Page<AddressLevel> getSyncResults(long catchmentId, Date lastModifiedDateTime, Date now, long organisationId, Pageable pageable);
 
     @Query(value = "select count(*)\n" +
             "from catchment c\n" +
@@ -55,39 +59,49 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
 
     AddressLevel findByTitleAndCatchmentsUuid(String title, String uuid);
 
-    //todo: The below 3 methods are similar queries. They can be combined.
-    @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
+    String locationProjectionBaseQuery = "select al.id, al.uuid, al.title, al.type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
+            "cast(al.lineage as text) as lineage, alt.level " +
             "from address_level al " +
             "left join address_level_type alt on alt.id = al.type_id " +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
             "where (:title is null or lower(al.title) like lower(concat('%', :title,'%'))) " +
-            "and al.is_voided = false order by al.title ",
+            "and al.is_voided = false ";
+
+    String orderByTitle = " order by al.title ";
+    String findLocationProjectionByTitleQuery = locationProjectionBaseQuery + orderByTitle;
+
+    @Query(value = findLocationProjectionByTitleQuery,
             nativeQuery = true)
     Page<LocationProjection> findLocationProjectionByTitleIgnoreCase(String title, Pageable pageable);
 
-    @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
-            "from address_level al " +
-            "left join address_level_type alt on alt.id = al.type_id " +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
-            "where (:title is null or lower(al.title) like lower(concat('%', :title,'%'))) " +
-            "and alt.id = :typeId " +
-            "and al.is_voided = false order by al.title ",
+    String addressLevelTypeClause = " and alt.id = :typeId ";
+    String findLocationProjectionByTitleIgnoreCaseAndTypeIdQuery = locationProjectionBaseQuery + addressLevelTypeClause + orderByTitle;
+
+    @Query(value = findLocationProjectionByTitleIgnoreCaseAndTypeIdQuery,
             nativeQuery = true)
     Page<LocationProjection> findLocationProjectionByTitleIgnoreCaseAndTypeId(String title, Integer typeId, Pageable pageable);
 
-    @Query(value = "select al.id, al.uuid, al.title, al.type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
-            "cast(al.lineage as text) as lineage, tll.title_lineage as titleLineage, alt.level " +
-            "from address_level al " +
-            "left join address_level_type alt on alt.id = al.type_id " +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
-            "where (:title is null or lower(al.title) like lower(concat('%', :title,'%'))) " +
-            "and alt.id = :typeId " +
-            "and al.is_voided = false " +
-            "and al.parent_id = :parentId order by al.title ",
+    @Query(value = findLocationProjectionByTitleIgnoreCaseAndTypeIdQuery,
+            nativeQuery = true)
+    List<LocationProjection> findLocationProjectionByTitleIgnoreCaseAndTypeIdAsList(String title, Integer typeId);
+
+    String addressLevelParentClause = " and al.parent_id = :parentId ";
+    String findLocationProjectionByTitleIgnoreCaseAndTypeIdAndParentIdQuery = locationProjectionBaseQuery + addressLevelTypeClause + addressLevelParentClause + orderByTitle;
+
+    @Query(value = findLocationProjectionByTitleIgnoreCaseAndTypeIdAndParentIdQuery,
             nativeQuery = true)
     Page<LocationProjection> findLocationProjectionByTitleIgnoreCaseAndTypeIdAndParentId(String title, int typeId, Integer parentId, Pageable pageable);
+
+    String addressLevelLineagePrefixClause = " and (:lineagePrefix is null or (al.lineage::text) COLLATE \"C\" = :lineagePrefix or (al.lineage::text) COLLATE \"C\" like :lineagePrefix || '.%') ";
+    String optionalTypeIdClause = " and (cast(:typeId as integer) is null or al.type_id = :typeId) ";
+    String findLocationProjectionByAncestorAndFiltersQuery =
+            locationProjectionBaseQuery + addressLevelLineagePrefixClause + optionalTypeIdClause + orderByTitle;
+
+    @Query(value = findLocationProjectionByAncestorAndFiltersQuery,
+            nativeQuery = true)
+    Page<LocationProjection> findLocationProjectionByAncestorAndFilters(@Param("title") String title,
+                                                                        @Param("typeId") Integer typeId,
+                                                                        @Param("lineagePrefix") String lineagePrefix,
+                                                                        Pageable pageable);
 
     AddressLevel findByTitleIgnoreCase(String title);
 
@@ -103,11 +117,12 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
 
     @Override
     default Page<AddressLevel> getSyncResults(SyncParameters syncParameters) {
-        return getSyncResults(syncParameters.getCatchment().getId(), syncParameters.getLastModifiedDateTime().toDate(), syncParameters.getNow().toDate(), syncParameters.getPageable());
+        Long organisationId = UserContextHolder.getOrganisation().getId();
+        return getSyncResults(syncParameters.getCatchment().getId(), syncParameters.getLastModifiedDateTime().toDate(), syncParameters.getNow().toDate(), organisationId, syncParameters.getPageable());
     }
 
     @Override
-    default boolean isEntityChangedForCatchment(SyncParameters syncParameters) {
+    default boolean isEntityChanged(SyncParameters syncParameters) {
         return getChangedRowCount(syncParameters.getCatchment().getId(), syncParameters.getLastModifiedDateTime().toDate()) > 0;
     }
 
@@ -124,14 +139,19 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
             nativeQuery = true)
     Page<AddressLevel> getAddressLevelsByLquery(@Param("lquery") String lquery, Pageable pageable);
 
-    AddressLevel findByParentAndTitleIgnoreCaseAndIsVoidedFalse(AddressLevel parent, String title);
+    AddressLevel findByParentAndTypeAndTitleIgnoreCaseAndIsVoidedFalse(AddressLevel parent, AddressLevelType addressLevelType, String title);
 
-    default AddressLevel findChildLocation(AddressLevel parent, String title) {
-        return this.findByParentAndTitleIgnoreCaseAndIsVoidedFalse(parent, title);
+    default AddressLevel findChildLocation(AddressLevel parent, AddressLevelType addressLevelType, String title) {
+        return this.findByParentAndTypeAndTitleIgnoreCaseAndIsVoidedFalse(parent, addressLevelType, title);
     }
 
-    @Query("select a from AddressLevel a where a.uuid =:id or a.legacyId = :id")
-    AddressLevel findByLegacyIdOrUuid(String id);
+    @Query("select a from AddressLevel a where (a.uuid =?1 or a.legacyId = ?1) and a.organisationId = ?2")
+    @QueryHints({@QueryHint(name = org.hibernate.jpa.QueryHints.HINT_CACHEABLE, value = "true")})
+    AddressLevel findByLegacyIdOrUuidAndOrgId(String id, Long organisationId);
+
+    default AddressLevel findByLegacyIdOrUuid(String id) {
+        return this.findByLegacyIdOrUuidAndOrgId(id, UserContextHolder.getUserContext().getOrganisationId());
+    }
 
     @Query(value = "select al.*\n" +
             "from address_level al\n" +
@@ -146,9 +166,10 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
         return this.findLocationByTitleTypeAndParentName(title, type, parentName);
     }
 
-    AddressLevel findByTitleIgnoreCaseAndTypeNameAndIsVoidedFalse(String title, String type);
-    default AddressLevel findLocation(String title, String type) {
-        return this.findByTitleIgnoreCaseAndTypeNameAndIsVoidedFalse(title, type);
+    List<AddressLevel> findByTitleIgnoreCaseAndTypeNameIgnoreCaseAndIsVoidedFalse(String title, String type);
+
+    default List<AddressLevel> findLocation(String title, String type) {
+        return this.findByTitleIgnoreCaseAndTypeNameIgnoreCaseAndIsVoidedFalse(title, type);
     }
 
     @RestResource(path = "findByParent", rel = "findByParent")
@@ -165,7 +186,7 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
     Long getAddressIdByLineage(String locationTitleLineage);
 
     default Optional<AddressLevel> findByTitleLineageIgnoreCase(String locationTitleLineage) {
-        if(!StringUtils.hasText(locationTitleLineage)) {
+        if (!StringUtils.hasText(locationTitleLineage)) {
             return Optional.empty();
         }
         Long addressId = getAddressIdByLineage(locationTitleLineage);
@@ -181,34 +202,44 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
     List<AddressLevel> findByIsVoidedFalseAndTitleIgnoreCaseContains(String title);
 
     @Query(value = "select id from address_level where lineage ~ cast(:lquery as lquery)", nativeQuery = true)
-    List<Long> getAllChildrenLocationsIds(@Param("lquery") String lquery);
+    List<Long> getAllChildrenLocationsIds(@Param("lquery") String lquery); //actually returns List<Integer>
 
-    @Query(value = "select * from virtual_catchment_address_mapping_table where catchment_id = :catchmentId", nativeQuery = true)
-    List<VirtualCatchmentProjection> getVirtualCatchmentsForCatchmentId(@Param("catchmentId") Long catchmentId);
+    @Query(value = "select * from address_level where lineage ~ cast(:lquery as lquery)", nativeQuery = true)
+    List<AddressLevel> getAllChildLocations(@Param("lquery") String lquery);
 
-    @Query(value = "select * from virtual_catchment_address_mapping_table where catchment_id = :catchmentId and type_id in (:typeIds)", nativeQuery = true)
-    List<VirtualCatchmentProjection> getVirtualCatchmentsForCatchmentIdAndLocationTypeId(@Param("catchmentId") Long catchmentId, List<Long> typeIds);
+    String CATCHMENT_ADDRESS_MAPPING_BASE_QUERY = "select row_number() over () as id, c.id as catchment_id, al1.id as addresslevel_id, al1.type_id as type_id from catchment c\n" +
+            "                         inner join catchment_address_mapping cam on c.id = cam.catchment_id\n" +
+            "                         inner join address_level al on cam.addresslevel_id = al.id\n" +
+            "                         inner join address_level al1 on al.lineage @> al1.lineage\n";
+    String CATCHMENT_ADDRESS_MAPPING_GROUP_BY = " group by 2, 3";
+    @Query(value = CATCHMENT_ADDRESS_MAPPING_BASE_QUERY + "where c.id = :catchmentId" + CATCHMENT_ADDRESS_MAPPING_GROUP_BY, nativeQuery = true)
+    List<CatchmentAddressProjection> getCatchmentAddressesForCatchmentId(@Param("catchmentId") Long catchmentId);
 
-    @Query(value = "select * from virtual_catchment_address_mapping_table where addresslevel_id in (:addressLevelIds)", nativeQuery = true)
-    List<VirtualCatchmentProjection> getVirtualCatchmentsForAddressLevelIds(@Param("addressLevelIds") List<Long> addressLevelIds);
+    @Query(value = CATCHMENT_ADDRESS_MAPPING_BASE_QUERY + "where c.id = :catchmentId and al1.type_id in (:typeIds)" + CATCHMENT_ADDRESS_MAPPING_GROUP_BY, nativeQuery = true)
+    List<CatchmentAddressProjection> getCatchmentAddressesForCatchmentIdAndLocationTypeId(@Param("catchmentId") Long catchmentId, List<Long> typeIds);
+
+    @Query(value = CATCHMENT_ADDRESS_MAPPING_BASE_QUERY + "where al1.id in (:addressLevelIds)" + CATCHMENT_ADDRESS_MAPPING_GROUP_BY, nativeQuery = true)
+    List<CatchmentAddressProjection> getCatchmentAddressesForAddressLevelIds(@Param("addressLevelIds") List<Long> addressLevelIds);
+
+    @Query(value = CATCHMENT_ADDRESS_MAPPING_BASE_QUERY + "where c.id = :catchmentId and al1.id = :addressLevelId" + CATCHMENT_ADDRESS_MAPPING_GROUP_BY, nativeQuery = true)
+    List<CatchmentAddressProjection> getCatchmentAddressForCatchmentIdAndAddressLevelId(@Param("addressLevelId") Long addressLevelId, @Param("catchmentId") Long catchmentId);
 
     @Query(value = "select title_lineage from title_lineage_locations_function(:addressId)", nativeQuery = true)
     String getTitleLineageById(Long addressId);
 
     @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
+            "cast(lineage as text) as lineage, " +
+            "alt.level " +
             "from address_level al " +
             "left join address_level_type alt on alt.id = al.type_id " +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
             "where al.is_voided = false",
             nativeQuery = true)
     Page<LocationProjection> findNonVoidedLocations(Pageable pageable);
 
     @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
+            "cast(lineage as text) as lineage, alt.level " +
             "from address_level al " +
             "left join address_level_type alt on alt.id = al.type_id " +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
             "where al.is_voided = false " +
             "and al.type_id = :typeId " +
             "order by al.title ",
@@ -216,20 +247,18 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
     List<LocationProjection> findNonVoidedLocationsByTypeId(Long typeId);
 
     @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId, " +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
+            "cast(lineage as text) as lineage, alt.level " +
             "from address_level al " +
             "left join address_level_type alt on alt.id = al.type_id " +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
             "where al.is_voided = false " +
             "and al.uuid = :uuid ",
             nativeQuery = true)
     LocationProjection findNonVoidedLocationsByUuid(String uuid);
 
     @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId,\n" +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
+            "cast(lineage as text) as lineage, alt.level " +
             "from address_level al\n" +
             "left join address_level_type alt on alt.id = al.type_id\n" +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
             "where lineage @>" +
             "          (select lineage" +
             "          from address_level" +
@@ -238,14 +267,44 @@ public interface LocationRepository extends ReferenceDataRepository<AddressLevel
     List<LocationProjection> getParentsWithMaxLevelTypeId(String uuid, Long maxLevelTypeId);
 
     @Query(value = "select al.id, al.uuid, title, type_id as typeId, alt.name as typeString, al.parent_id as parentId,\n" +
-            "cast(lineage as text) as lineage, title_lineage as titleLineage, alt.level " +
+            "cast(lineage as text) as lineage, alt.level " +
             "from address_level al\n" +
             "left join address_level_type alt on alt.id = al.type_id\n" +
-            "left join title_lineage_locations_view tll on tll.lowestpoint_id = al.id " +
             "where lineage @>" +
             "          (select lineage" +
             "          from address_level" +
             "         where uuid = :uuid)",
             nativeQuery = true)
     List<LocationProjection> getParents(String uuid);
+
+    List<AddressLevel> findByTitleAndType(String title, AddressLevelType lowestAddressLevelType, Pageable pageable);
+
+    List<AddressLevel> findByTitleIgnoreCaseAndType(String title, AddressLevelType lowestAddressLevelType, Pageable pageable);
+
+    AddressLevel findByTitleAndTypeAndIsVoidedFalse(String title, AddressLevelType addressLevelType);
+
+    List<AddressLevel> findAllByIdIn(List<Long> addressIds);
+
+    @Override
+    default void deleteAll() {
+        throw new UnsupportedOperationException();
+    }
+
+    /*
+    For some reason, deleteAllInBatch() is trying to delete mapped tables. catchment_address_mapping does not have RLS,
+    which makes deleteAll a dangerous operation. This is limiting the capability of this delete.
+     */
+    @Override
+    @RestResource(exported = false)
+    @Modifying
+    @Query(value = "delete from address_level", nativeQuery = true)
+    void deleteAllInBatch();
+
+    @Modifying
+    @RestResource(exported = false)
+    @Query(value = "update address_level set is_voided = true, " +
+            "last_modified_date_time = (current_timestamp + random() * 5000 * (interval '1 millisecond')), " +
+            "last_modified_by_id = :lastModifiedById " +
+            "where type_id = :addressLevelTypeId and is_voided = false", nativeQuery = true)
+    void voidLocationsByAddressLevelTypeId(@Param("addressLevelTypeId") Long addressLevelTypeId, @Param("lastModifiedById") Long lastModifiedById);
 }

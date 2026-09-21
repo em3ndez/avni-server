@@ -1,5 +1,6 @@
 package org.avni.server.web.api;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.ConceptRepository;
 import org.avni.server.dao.IndividualRepository;
 import org.avni.server.dao.ProgramEnrolmentRepository;
@@ -8,14 +9,16 @@ import org.avni.server.domain.CHSEntity;
 import org.avni.server.domain.Individual;
 import org.avni.server.domain.Program;
 import org.avni.server.domain.ProgramEnrolment;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.service.ConceptService;
 import org.avni.server.service.MediaObservationService;
 import org.avni.server.service.ProgramEnrolmentService;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.util.S;
+import org.avni.server.web.request.api.ApiProgramEnrolmentRequest;
 import org.avni.server.web.request.api.RequestUtils;
 import org.avni.server.web.response.ProgramEnrolmentResponse;
 import org.avni.server.web.response.ResponsePage;
-import org.avni.server.web.request.api.ApiProgramEnrolmentRequest;
 import org.joda.time.DateTime;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
@@ -27,7 +30,6 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
 import java.io.IOException;
 import java.util.ArrayList;
 
@@ -40,9 +42,10 @@ public class ProgramEnrolmentApiController {
     private final ProgramRepository programRepository;
     private final ProgramEnrolmentService programEnrolmentService;
     private final MediaObservationService mediaObservationService;
+    private final AccessControlService accessControlService;
 
     @Autowired
-    public ProgramEnrolmentApiController(ProgramEnrolmentRepository programEnrolmentRepository, ConceptRepository conceptRepository, ConceptService conceptService, IndividualRepository individualRepository, ProgramRepository programRepository, ProgramEnrolmentService programEnrolmentService, MediaObservationService mediaObservationService) {
+    public ProgramEnrolmentApiController(ProgramEnrolmentRepository programEnrolmentRepository, ConceptRepository conceptRepository, ConceptService conceptService, IndividualRepository individualRepository, ProgramRepository programRepository, ProgramEnrolmentService programEnrolmentService, MediaObservationService mediaObservationService, AccessControlService accessControlService) {
         this.programEnrolmentRepository = programEnrolmentRepository;
         this.conceptRepository = conceptRepository;
         this.conceptService = conceptService;
@@ -50,16 +53,18 @@ public class ProgramEnrolmentApiController {
         this.programRepository = programRepository;
         this.programEnrolmentService = programEnrolmentService;
         this.mediaObservationService = mediaObservationService;
+        this.accessControlService = accessControlService;
     }
 
     @PostMapping(value = "/api/programEnrolment")
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     @ResponseBody
     public ResponseEntity post(@RequestBody ApiProgramEnrolmentRequest request) throws IOException {
+        accessControlService.checkProgramPrivilege(PrivilegeType.EnrolSubject, request.getProgram());
         ProgramEnrolment programEnrolment = createProgramEnrolment(request.getExternalId());
         initializeIndividual(request, programEnrolment);
-        updateEnrolment(programEnrolment, request);
+        programEnrolment = updateEnrolment(programEnrolment, request);
         return new ResponseEntity<>(ProgramEnrolmentResponse.fromProgramEnrolment(programEnrolment, conceptRepository, conceptService), HttpStatus.OK);
     }
 
@@ -71,9 +76,10 @@ public class ProgramEnrolmentApiController {
 
     @PutMapping(value = "/api/programEnrolment/{id}")
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    @Transactional
+    @Transactional(rollbackFor = Exception.class)
     @ResponseBody
     public ResponseEntity<ProgramEnrolmentResponse> put(@PathVariable String id, @RequestBody ApiProgramEnrolmentRequest request) throws IOException {
+        accessControlService.checkProgramPrivilege(PrivilegeType.EnrolSubject, request.getProgram());
         ProgramEnrolment programEnrolment = programEnrolmentRepository.findByLegacyIdOrUuid(id);
         if (programEnrolment == null && StringUtils.hasLength(request.getExternalId())) {
             programEnrolment = programEnrolmentRepository.findByLegacyId(request.getExternalId().trim());
@@ -108,6 +114,7 @@ public class ProgramEnrolmentApiController {
 
     @RequestMapping(value = "/api/programEnrolments", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     public Object getEnrolments(@RequestParam(name = "lastModifiedDateTime", required = false)
                                     @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
                                 @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
@@ -116,26 +123,29 @@ public class ProgramEnrolmentApiController {
                                 Pageable pageable) {
         Page<ProgramEnrolment> programEnrolments;
         if (S.isEmpty(program) && lastModifiedDateTime != null) {
-            programEnrolments = programEnrolmentRepository.findByLastModifiedDateTimeGreaterThanAndLastModifiedDateTimeLessThanOrderByLastModifiedDateTimeAscIdAsc(CHSEntity.toDate(lastModifiedDateTime), CHSEntity.toDate(now), pageable);
+            programEnrolments = programEnrolmentRepository.search(CHSEntity.toDate(lastModifiedDateTime), CHSEntity.toDate(now), null, null, pageable);
         } else if (S.isEmpty(subjectUuid) && lastModifiedDateTime != null) {
-            programEnrolments = programEnrolmentRepository.findByLastModifiedDateTimeGreaterThanAndLastModifiedDateTimeLessThanAndProgramNameOrderByLastModifiedDateTimeAscIdAsc(CHSEntity.toDate(lastModifiedDateTime), CHSEntity.toDate(now), program, pageable);
+            programEnrolments = programEnrolmentRepository.search(CHSEntity.toDate(lastModifiedDateTime), CHSEntity.toDate(now), program, null, pageable);
         } else if (!S.isEmpty(subjectUuid) && !S.isEmpty(program)) {
-            programEnrolments = programEnrolmentRepository.findByProgramNameAndIndividualUuidOrderByLastModifiedDateTimeAscIdAsc(program, subjectUuid, pageable);
+            programEnrolments = programEnrolmentRepository.search(null, null, program, subjectUuid, pageable);
         } else {
             return new ResponseEntity<>(HttpStatus.BAD_REQUEST);
         }
         ArrayList<ProgramEnrolmentResponse> programEnrolmentResponses = new ArrayList<>();
         programEnrolments.forEach(programEnrolment -> programEnrolmentResponses.add(ProgramEnrolmentResponse.fromProgramEnrolment(programEnrolment, conceptRepository, conceptService)));
+        accessControlService.checkProgramPrivileges(PrivilegeType.ViewEnrolmentDetails, programEnrolments.getContent());
         return new ResponsePage(programEnrolmentResponses, programEnrolments.getNumberOfElements(), programEnrolments.getTotalPages(), programEnrolments.getSize());
     }
 
     @GetMapping(value = "/api/programEnrolment/{id}")
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public ResponseEntity<ProgramEnrolmentResponse> get(@PathVariable("id") String legacyIdOrUuid) {
         ProgramEnrolment programEnrolment = programEnrolmentRepository.findByLegacyIdOrUuid(legacyIdOrUuid);
         if (programEnrolment == null)
             return new ResponseEntity<>(HttpStatus.NOT_FOUND);
+        accessControlService.checkProgramPrivilege(PrivilegeType.ViewEnrolmentDetails, programEnrolment);
         return new ResponseEntity<>(ProgramEnrolmentResponse.fromProgramEnrolment(programEnrolment, conceptRepository, conceptService), HttpStatus.OK);
     }
 
@@ -147,6 +157,7 @@ public class ProgramEnrolmentApiController {
         if (programEnrolment == null)
             return new ResponseEntity<>(HttpStatus.NOT_FOUND);
         programEnrolment = programEnrolmentService.voidEnrolment(programEnrolment);
+        accessControlService.checkProgramPrivilege(PrivilegeType.RejectEnrolment, programEnrolment);
         return new ResponseEntity<>(ProgramEnrolmentResponse.fromProgramEnrolment(programEnrolment, conceptRepository, conceptService), HttpStatus.OK);
     }
 

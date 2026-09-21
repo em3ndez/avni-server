@@ -1,9 +1,8 @@
 package org.avni.server.dao.individualRelationship;
 
-import org.avni.server.dao.FindByLastModifiedDateTime;
-import org.avni.server.dao.OperatingIndividualScopeAwareRepository;
-import org.avni.server.dao.SyncParameters;
-import org.avni.server.dao.TransactionalDataRepository;
+import jakarta.persistence.criteria.*;
+import org.avni.server.dao.*;
+import org.avni.server.domain.AddressLevel;
 import org.avni.server.domain.Individual;
 import org.avni.server.domain.SubjectType;
 import org.avni.server.domain.User;
@@ -11,13 +10,12 @@ import org.avni.server.domain.individualRelationship.IndividualRelationship;
 import org.avni.server.framework.security.UserContextHolder;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Slice;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
 import org.springframework.stereotype.Repository;
 
-import javax.persistence.criteria.*;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -27,7 +25,7 @@ import static org.avni.server.dao.sync.TransactionDataCriteriaBuilderUtil.joinUs
 
 @Repository
 @RepositoryRestResource(collectionResourceRel = "individualRelationship", path = "individualRelationship", exported = false)
-public interface IndividualRelationshipRepository extends TransactionalDataRepository<IndividualRelationship>, FindByLastModifiedDateTime<IndividualRelationship>, OperatingIndividualScopeAwareRepository<IndividualRelationship> {
+public interface IndividualRelationshipRepository extends TransactionalDataRepository<IndividualRelationship>, FindByLastModifiedDateTime<IndividualRelationship>, OperatingIndividualScopeAwareRepository<IndividualRelationship>, SubjectTreeItemRepository {
     Page<IndividualRelationship> findByIndividualaAddressLevelVirtualCatchmentsIdAndLastModifiedDateTimeIsBetweenOrderByLastModifiedDateTimeAscIdAsc(
             long catchmentId, Date lastModifiedDateTime, Date now, Pageable pageable);
 
@@ -72,11 +70,29 @@ public interface IndividualRelationshipRepository extends TransactionalDataRepos
     }
 
     @Override
-    default boolean isEntityChangedForCatchment(SyncParameters syncParameters) {
+    default boolean isEntityChanged(SyncParameters syncParameters) {
         return count(syncEntityChangedAuditSpecification(syncParameters)
                 .and(syncStrategySpecification(syncParameters))
+                .and(syncDisabledSpecification())
         ) > 0;
     }
 
     List<IndividualRelationship> findByIndividualaAndIndividualBAndIsVoidedFalse(Individual individualA, Individual individualB);
+
+    @Modifying(clearAutomatically = true)
+    @Query(value = "update individual_relationship ir set last_modified_date_time = (current_timestamp + id * (interval '1 millisecond')/1000), last_modified_by_id = :lastModifiedById" +
+            " where ir.individual_a_id = :individualId or ir.individual_b_id = :individualId", nativeQuery = true)
+    void setChangedForSync(Long individualId, Long lastModifiedById);
+    default void setChangedForSync(Individual individual) {
+        this.setChangedForSync(individual.getId(), UserContextHolder.getUserId());
+    }
+
+    @Modifying
+    @Query(value = "update individual_relationship e set is_voided = true, last_modified_date_time = (current_timestamp + random() * 5000 * (interval '1 millisecond')), last_modified_by_id = :lastModifiedById " +
+            " from individual i" +
+            " where i.address_id = :addressId and (i.id = e.individual_a_id or i.id = e.individual_b_id) and e.is_voided = false", nativeQuery = true)
+    void voidSubjectItemsAt(Long addressId, Long lastModifiedById);
+    default void voidSubjectItemsAt(AddressLevel address) {
+        this.voidSubjectItemsAt(address.getId(), UserContextHolder.getUserId());
+    }
 }

@@ -4,21 +4,23 @@ import org.avni.server.dao.AddressLevelTypeRepository;
 import org.avni.server.dao.ConceptRepository;
 import org.avni.server.dao.LocationRepository;
 import org.avni.server.domain.Concept;
+import org.avni.server.mapper.ConceptMapper;
 import org.avni.server.web.request.AddressLevelContractWeb;
 import org.avni.server.web.request.AddressLevelTypeContract;
 import org.avni.server.web.request.ConceptContract;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 import java.util.stream.Collectors;
 
 @RestController
+@Transactional(readOnly = true)
 public class SearchController {
     private final ConceptRepository conceptRepository;
     private final LocationRepository locationRepository;
@@ -35,7 +37,6 @@ public class SearchController {
     }
 
     @RequestMapping(value = "/search/concept", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'user')")
     public List<ConceptContract> searchConcept(@RequestParam String name,
                                                @RequestParam(required = false) String dataType) {
         if (dataType == null) {
@@ -46,7 +47,6 @@ public class SearchController {
     }
 
     @RequestMapping(value = "/search/location", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user')")
     public List<AddressLevelContractWeb> searchLocation(@RequestParam String name) {
         return locationRepository.findByIsVoidedFalseAndTitleIgnoreCaseContains(name)
                 .stream()
@@ -55,7 +55,6 @@ public class SearchController {
     }
 
     @RequestMapping(value = "/search/locationType", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('user')")
     public List<AddressLevelTypeContract> searchLocationType(@RequestParam String name) {
         return addressLevelTypeRepository.findByIsVoidedFalseAndNameIgnoreCaseContains(name)
                 .stream()
@@ -64,11 +63,10 @@ public class SearchController {
     }
 
     private List<ConceptContract> getConceptContract(List<Concept> concepts) {
+        ConceptMapper conceptMapper = new ConceptMapper();
         return concepts
                 .stream()
-                .map(Concept::toConceptContract)
+                .map(conceptMapper::toConceptContract)
                 .collect(Collectors.toList());
     }
-
-
 }

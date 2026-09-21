@@ -12,10 +12,9 @@ import java.util.List;
 
 @Service
 public class AccountAdminService {
-
     private final Logger logger;
-    private AccountAdminRepository accountAdminRepository;
-    private AccountRepository accountRepository;
+    private final AccountAdminRepository accountAdminRepository;
+    private final AccountRepository accountRepository;
 
     public AccountAdminService(AccountAdminRepository accountAdminRepository, AccountRepository accountRepository) {
         this.accountAdminRepository = accountAdminRepository;
@@ -37,4 +36,15 @@ public class AccountAdminService {
         });
     }
 
+    public void syncAccountAdmins(User user, List<Long> accountIds) {
+        createAccountAdmins(user, accountIds);
+
+        List<AccountAdmin> existingAccountAdmins = accountAdminRepository.findByUser_Id(user.getId());
+        existingAccountAdmins.stream()
+                .filter(accountAdmin -> !accountIds.contains(accountAdmin.getAccount().getId()))
+                .forEach(accountAdmin -> {
+                    logger.info("Deleting account admin {} for account {}", user.getName(), accountAdmin.getAccount().getId());
+                    accountAdminRepository.delete(accountAdmin);
+                });
+    }
 }

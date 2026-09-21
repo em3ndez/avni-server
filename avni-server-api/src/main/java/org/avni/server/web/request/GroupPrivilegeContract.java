@@ -4,7 +4,10 @@ import org.avni.server.domain.ChecklistDetail;
 import org.avni.server.domain.EncounterType;
 import org.avni.server.domain.accessControl.GroupPrivilege;
 import org.avni.server.domain.Program;
+import org.avni.server.domain.SubjectType;
 
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -14,6 +17,7 @@ public class GroupPrivilegeContract {
     private Long groupId;
     private Long privilegeId;
     private String privilegeEntityType;
+    private String privilegeTypeName;
     private String privilegeName;
     private String privilegeDescription;
     private Long subjectTypeId;
@@ -28,17 +32,20 @@ public class GroupPrivilegeContract {
     private Optional<String> checklistDetailName;
     private boolean allow;
     private String uuid;
+    private List<Long> memberSubjectIds;
 
     public static GroupPrivilegeContract fromEntity(GroupPrivilege groupPrivilege) {
         GroupPrivilegeContract groupPrivilegeContract = new GroupPrivilegeContract();
         groupPrivilegeContract.setGroupPrivilegeId(groupPrivilege.getId());
         groupPrivilegeContract.setGroupId(groupPrivilege.getGroup().getId());
         groupPrivilegeContract.setPrivilegeId(groupPrivilege.getPrivilege().getId());
-        groupPrivilegeContract.setPrivilegeEntityType(groupPrivilege.getPrivilege().getEntityType().toString());
+        groupPrivilegeContract.setPrivilegeEntityType(groupPrivilege.getPrivilege().getEntityType().name());
+        groupPrivilegeContract.privilegeTypeName = groupPrivilege.getPrivilege().getType().name();
         groupPrivilegeContract.setPrivilegeName(groupPrivilege.getPrivilege().getName());
         groupPrivilegeContract.setPrivilegeDescription(groupPrivilege.getPrivilege().getDescription());
-        groupPrivilegeContract.setSubjectTypeId(groupPrivilege.getSubjectType().getId());
-        groupPrivilegeContract.setSubjectTypeName(groupPrivilege.getSubjectType().getName());
+        groupPrivilegeContract.setSubjectTypeId(Optional.ofNullable(groupPrivilege.getSubjectType()).map(SubjectType::getId).orElse(null));
+        groupPrivilegeContract.setSubjectTypeName(Optional.ofNullable(groupPrivilege.getSubjectType()).map(SubjectType::getName).orElse(null));
+        groupPrivilegeContract.setMemberSubjectIds(Optional.ofNullable(groupPrivilege.getSubjectType()).map(SubjectType::getMemberSubjectIds).orElse(Collections.emptyList()));
         groupPrivilegeContract.setProgramId(Optional.ofNullable(groupPrivilege.getProgram()).map(Program::getId));
         groupPrivilegeContract.setProgramName(Optional.ofNullable(groupPrivilege.getProgram()).map(Program::getName).orElse(null));
         groupPrivilegeContract.setProgramEncounterTypeId(Optional.ofNullable(groupPrivilege.getProgramEncounterType()).map(EncounterType::getId));
@@ -50,7 +57,6 @@ public class GroupPrivilegeContract {
         groupPrivilegeContract.setAllow(groupPrivilege.isAllow());
         groupPrivilegeContract.setUuid(groupPrivilege.getUuid());
         return groupPrivilegeContract;
-
     }
 
     public Long getSubjectTypeId() {
@@ -61,32 +67,32 @@ public class GroupPrivilegeContract {
         this.subjectTypeId = subjectTypeId;
     }
 
-    public Optional<Long> getProgramId() {
-        return programId;
+    public Long getProgramId() {
+        return programId == null ? null : programId.orElse(null);
     }
 
     public void setProgramId(Optional<Long> programId) {
         this.programId = programId;
     }
 
-    public Optional<Long> getProgramEncounterTypeId() {
-        return programEncounterTypeId;
+    public Long getProgramEncounterTypeId() {
+        return programEncounterTypeId == null ? null : programEncounterTypeId.orElse(null);
     }
 
     public void setProgramEncounterTypeId(Optional<Long> programEncounterTypeId) {
         this.programEncounterTypeId = programEncounterTypeId;
     }
 
-    public Optional<Long> getEncounterTypeId() {
-        return encounterTypeId;
+    public Long getEncounterTypeId() {
+        return encounterTypeId == null ? null : encounterTypeId.orElse(null);
     }
 
     public void setEncounterTypeId(Optional<Long> encounterTypeId) {
         this.encounterTypeId = encounterTypeId;
     }
 
-    public Optional<Long> getChecklistDetailId() {
-        return checklistDetailId;
+    public Long getChecklistDetailId() {
+        return checklistDetailId == null ? null : checklistDetailId.orElse(null);
     }
 
     public void setChecklistDetailId(Optional<Long> checklistDetailId) {
@@ -149,32 +155,32 @@ public class GroupPrivilegeContract {
         this.subjectTypeName = subjectTypeName;
     }
 
-    public Optional<String> getProgramName() {
-        return programName;
+    public String getProgramName() {
+        return programName == null ? null : programName.orElse(null);
     }
 
     public void setProgramName(String programName) {
         this.programName = Optional.ofNullable(programName);
     }
 
-    public Optional<String> getProgramEncounterTypeName() {
-        return programEncounterTypeName;
+    public String getProgramEncounterTypeName() {
+        return programEncounterTypeName == null ? null : programEncounterTypeName.orElse(null);
     }
 
     public void setProgramEncounterTypeName(String programEncounterTypeName) {
         this.programEncounterTypeName = Optional.ofNullable(programEncounterTypeName);
     }
 
-    public Optional<String> getEncounterTypeName() {
-        return encounterTypeName;
+    public String getEncounterTypeName() {
+        return encounterTypeName == null ? null : encounterTypeName.orElse(null);
     }
 
     public void setEncounterTypeName(String encounterTypeName) {
         this.encounterTypeName = Optional.ofNullable(encounterTypeName);
     }
 
-    public Optional<String> getChecklistDetailName() {
-        return checklistDetailName;
+    public String getChecklistDetailName() {
+        return checklistDetailName == null ? null : checklistDetailName.orElse(null);
     }
 
     public void setChecklistDetailName(String checklistDetailName) {
@@ -197,6 +203,18 @@ public class GroupPrivilegeContract {
         this.uuid = uuid;
     }
 
+    public String getPrivilegeTypeName() {
+        return privilegeTypeName;
+    }
+
+    public void setMemberSubjectIds(List<Long> memberSubjectIds) {
+        this.memberSubjectIds = memberSubjectIds;
+    }
+
+    public List<Long> getMemberSubjectIds() {
+        return memberSubjectIds;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -204,7 +222,7 @@ public class GroupPrivilegeContract {
         GroupPrivilegeContract that = (GroupPrivilegeContract) o;
         return groupId.equals(that.groupId) &&
                 privilegeId.equals(that.privilegeId) &&
-                subjectTypeId.equals(that.subjectTypeId) &&
+                Objects.equals(subjectTypeId, that.subjectTypeId) &&
                 Objects.equals(programId, that.programId) &&
                 Objects.equals(programEncounterTypeId, that.programEncounterTypeId) &&
                 Objects.equals(encounterTypeId, that.encounterTypeId) &&

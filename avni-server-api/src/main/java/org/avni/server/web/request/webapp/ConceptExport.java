@@ -113,7 +113,6 @@ public class ConceptExport {
     public void setVoided(boolean voided) {
         this.voided = voided;
     }
-
     public static ConceptExport fromConcept(Concept concept) {
         ConceptExport export = new ConceptExport();
         export.setName(concept.getName());
@@ -127,6 +126,7 @@ public class ConceptExport {
         export.setVoided(concept.isVoided());
         export.setActive(concept.getActive());
         export.setKeyValues(concept.getKeyValues());
+        // concept media handled separately at the end of bundle export/import
         List<ConceptAnswer> conceptAnswersSortedByOrder = concept.getConceptAnswers()
                 .stream()
                 .sorted(Comparator.comparing(ConceptAnswer::getOrder))

@@ -1,0 +1,242 @@
+package org.avni.server.domain;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import jakarta.persistence.*;
+import jakarta.validation.constraints.NotNull;
+import org.avni.server.framework.hibernate.JSONObjectUserType;
+import org.hibernate.annotations.BatchSize;
+import org.hibernate.annotations.Type;
+import org.springframework.util.StringUtils;
+
+import java.util.HashMap;
+import java.util.List;
+
+@Entity
+@Table(name = "report_card")
+@BatchSize(size = 100)
+@JsonIgnoreProperties({"standardReportCardType", "customCardConfig"})
+public class ReportCard extends OrganisationAwareEntity {
+    public static final int INT_CONSTANT_DEFAULT_COUNT_OF_CARDS = 1;
+    public static final int INT_CONSTANT_MAX_COUNT_OF_CARDS = 9;
+    @NotNull
+    private String name;
+
+    private String query;
+
+    private String description;
+
+    private String colour;
+
+    private boolean nested = false;
+
+    private int countOfCards = INT_CONSTANT_DEFAULT_COUNT_OF_CARDS;
+
+    @Column(name = "icon_file_s3_key")
+    private String iconFileS3Key;
+
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "standard_report_card_type_id")
+    private StandardReportCardType standardReportCardType;
+
+    @Column
+    @Type(value = JSONObjectUserType.class)
+    private JsonObject standardReportCardInput = new JsonObject(new HashMap<>());
+
+    @Column
+    @Enumerated(EnumType.STRING)
+    private ReportCardAction action;
+
+    @Type(value = JSONObjectUserType.class)
+    private JsonObject actionDetail;
+
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinColumn(name = "custom_card_config_id")
+    private CustomCardConfig customCardConfig;
+
+    @Column(name = "on_action_completion")
+    @Enumerated(EnumType.STRING)
+    private ReportCardActionCompletion onActionCompletion;
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getQuery() {
+        return query;
+    }
+
+    public void setQuery(String query) {
+        this.query = query;
+    }
+
+    public String getDescription() {
+        return description;
+    }
+
+    public void setDescription(String description) {
+        this.description = description;
+    }
+
+    public String getColour() {
+        return colour;
+    }
+
+    public void setColour(String colour) {
+        this.colour = colour;
+    }
+
+    public boolean isNested() {
+        return getStandardReportCardType() == null && nested;
+    }
+
+    public void setNested(boolean nested) {
+        this.nested = getStandardReportCardType() == null && nested;
+    }
+
+    public int getCountOfCards() {
+        return isNested() ? this.countOfCards : INT_CONSTANT_DEFAULT_COUNT_OF_CARDS;
+    }
+
+    public void setCountOfCards(int countOfCards) {
+        this.countOfCards = isNested() ? countOfCards : INT_CONSTANT_DEFAULT_COUNT_OF_CARDS;
+    }
+
+    public StandardReportCardType getStandardReportCardType() {
+        return standardReportCardType;
+    }
+
+    public void setStandardReportCardType(StandardReportCardType standardReportCardType) {
+        Boolean reportCardTypeChangedFromQueryToStandard = (this.standardReportCardType == null && standardReportCardType != null);
+        this.standardReportCardType = standardReportCardType;
+        resetNestedCardInfoOnlyApplicableForQueryReportCardType(reportCardTypeChangedFromQueryToStandard);
+    }
+
+    private void resetNestedCardInfoOnlyApplicableForQueryReportCardType(Boolean reportCardTypeChangedFromQueryToStandard) {
+        if (reportCardTypeChangedFromQueryToStandard) {
+            this.setNested(false);
+            this.setCountOfCards(INT_CONSTANT_DEFAULT_COUNT_OF_CARDS);
+        }
+    }
+
+    public String getIconFileS3Key() {
+        return iconFileS3Key;
+    }
+
+    public void setIconFileS3Key(String iconFileS3Key) {
+        this.iconFileS3Key = StringUtils.isEmpty(iconFileS3Key) ? null : iconFileS3Key;
+    }
+
+    public List<String> getStandardReportCardInputSubjectTypes() {
+        return standardReportCardInput.getList("subjectTypes");
+    }
+
+    public void setStandardReportCardInputSubjectTypes(List<String> subjectTypes) {
+        standardReportCardInput.with("subjectTypes", subjectTypes);
+    }
+
+    public List<String> getStandardReportCardInputPrograms() {
+        return standardReportCardInput.getList("programs");
+    }
+
+    public void setStandardReportCardInputPrograms(List<String> programs) {
+        standardReportCardInput.with("programs", programs);
+    }
+
+    public List<String> getStandardReportCardInputEncounterTypes() {
+        return standardReportCardInput.getList("encounterTypes");
+    }
+
+    public void setStandardReportCardInputEncounterTypes(List<String> encounterTypes) {
+        standardReportCardInput.with("encounterTypes", encounterTypes);
+    }
+
+    public String getStandardReportCardInputRecentDuration() {
+        return standardReportCardInput.getString("recentDuration");
+    }
+
+    public void setStandardReportCardInputRecentDuration(ValueUnit standardReportCardInputRecentDuration) {
+        String value = standardReportCardInputRecentDuration.toJSONString();
+        standardReportCardInput.with("recentDuration", value);
+    }
+
+    public void resetStandardReportCardInputRecentDuration() {
+        standardReportCardInput.remove("recentDuration");
+    }
+
+    public void resetStandardReportCardInput() {
+        standardReportCardInput = new JsonObject(new HashMap<>());
+    }
+
+    public ReportCardAction getAction() {
+        return action;
+    }
+
+    public void setAction(ReportCardAction action) {
+        this.action = action;
+    }
+
+    public JsonObject getActionDetail() {
+        return actionDetail;
+    }
+
+    public void setActionDetail(JsonObject actionDetail) {
+        this.actionDetail = actionDetail;
+    }
+
+    public String getActionDetailSubjectTypeUUID() {
+        return actionDetail != null ? actionDetail.getString("subjectTypeUUID") : null;
+    }
+
+    public String getActionDetailProgramUUID() {
+        return actionDetail != null ? actionDetail.getString("programUUID") : null;
+    }
+
+    public String getActionDetailEncounterTypeUUID() {
+        return actionDetail != null ? actionDetail.getString("encounterTypeUUID") : null;
+    }
+
+    public String getActionDetailVisitType() {
+        return actionDetail != null ? actionDetail.getString("visitType") : null;
+    }
+
+    public String getActionDetailAttendanceTypeUUID() {
+        return actionDetail != null ? actionDetail.getString("attendanceTypeUUID") : null;
+    }
+
+    public void setActionDetailFields(String subjectTypeUUID, String programUUID, String encounterTypeUUID, String visitType) {
+        this.actionDetail = new JsonObject(new HashMap<>());
+        this.actionDetail.with("subjectTypeUUID", subjectTypeUUID);
+        this.actionDetail.with("programUUID", programUUID);
+        this.actionDetail.with("encounterTypeUUID", encounterTypeUUID);
+        this.actionDetail.with("visitType", visitType);
+    }
+
+    // MarkAttendance overload — fresh JsonObject so any stale DoVisit keys
+    // (programUUID / encounterTypeUUID / visitType) get cleared when an
+    // existing card is switched between action types.
+    public void setActionDetailFields(String subjectTypeUUID, String attendanceTypeUUID) {
+        this.actionDetail = new JsonObject(new HashMap<>());
+        this.actionDetail.with("subjectTypeUUID", subjectTypeUUID);
+        this.actionDetail.with("attendanceTypeUUID", attendanceTypeUUID);
+    }
+
+    public CustomCardConfig getCustomCardConfig() {
+        return customCardConfig;
+    }
+
+    public void setCustomCardConfig(CustomCardConfig customCardConfig) {
+        this.customCardConfig = customCardConfig;
+    }
+
+    public ReportCardActionCompletion getOnActionCompletion() {
+        return onActionCompletion;
+    }
+
+    public void setOnActionCompletion(ReportCardActionCompletion onActionCompletion) {
+        this.onActionCompletion = onActionCompletion;
+    }
+}

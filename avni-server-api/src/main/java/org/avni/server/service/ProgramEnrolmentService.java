@@ -1,25 +1,28 @@
 package org.avni.server.service;
 
+import com.bugsnag.Bugsnag;
 import org.avni.messaging.domain.EntityType;
+import org.avni.server.application.FormMapping;
+import org.avni.server.application.FormType;
 import org.avni.server.common.EntityHelper;
 import org.avni.server.common.Messageable;
 import org.avni.server.dao.*;
-import org.avni.server.dao.application.FormMappingRepository;
 import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.geo.Point;
-import org.avni.server.util.BadRequestError;
 import org.avni.server.web.request.*;
 import org.avni.server.web.request.rules.RulesContractWrapper.ChecklistContract;
+import org.avni.server.web.request.rules.RulesContractWrapper.Decision;
 import org.avni.server.web.request.rules.RulesContractWrapper.Decisions;
 import org.joda.time.DateTime;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 
-import javax.transaction.Transactional;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -30,22 +33,23 @@ import static org.springframework.data.jpa.domain.Specification.where;
 
 
 @Service
-public class ProgramEnrolmentService implements ScopeAwareService {
+public class ProgramEnrolmentService implements ScopeAwareService<ProgramEnrolment> {
     private static org.slf4j.Logger logger = LoggerFactory.getLogger(ProgramEnrolmentService.class);
 
-    private ProgramEnrolmentRepository programEnrolmentRepository;
-    private ProgramEncounterService programEncounterService;
-    private ProgramEncounterRepository programEncounterRepository;
-    private ProgramRepository programRepository;
-    private ObservationService observationService;
-    private IndividualRepository individualRepository;
-    private ProgramOutcomeRepository programOutcomeRepository;
-    private ChecklistDetailRepository checklistDetailRepository;
-    private ChecklistItemDetailRepository checklistItemDetailRepository;
-    private ChecklistRepository checklistRepository;
-    private ChecklistItemRepository checklistItemRepository;
+    private final ProgramEnrolmentRepository programEnrolmentRepository;
+    private final ProgramEncounterService programEncounterService;
+    private final ProgramEncounterRepository programEncounterRepository;
+    private final ProgramRepository programRepository;
+    private final ObservationService observationService;
+    private final IndividualRepository individualRepository;
+    private final ChecklistDetailRepository checklistDetailRepository;
+    private final ChecklistItemDetailRepository checklistItemDetailRepository;
+    private final ChecklistRepository checklistRepository;
+    private final ChecklistItemRepository checklistItemRepository;
     private final IdentifierAssignmentRepository identifierAssignmentRepository;
-    private final FormMappingRepository formMappingRepository;
+    private final Bugsnag bugsnag;
+    private final FormMappingService formMappingService;
+    private final SubjectMigrationService subjectMigrationService;
 
     @Autowired
     public ProgramEnrolmentService(ProgramEnrolmentRepository programEnrolmentRepository,
@@ -54,40 +58,28 @@ public class ProgramEnrolmentService implements ScopeAwareService {
                                    ProgramRepository programRepository,
                                    ObservationService observationService,
                                    IndividualRepository individualRepository,
-                                   ProgramOutcomeRepository programOutcomeRepository,
                                    ChecklistDetailRepository checklistDetailRepository,
                                    ChecklistItemDetailRepository checklistItemDetailRepository,
                                    ChecklistRepository checklistRepository,
                                    ChecklistItemRepository checklistItemRepository,
                                    IdentifierAssignmentRepository identifierAssignmentRepository,
-                                   FormMappingRepository formMappingRepository) {
+                                   FormMappingService formMappingService,
+                                   Bugsnag bugsnag,
+                                   SubjectMigrationService subjectMigrationService) {
         this.programEnrolmentRepository = programEnrolmentRepository;
         this.programEncounterService = programEncounterService;
         this.programEncounterRepository = programEncounterRepository;
         this.programRepository = programRepository;
         this.observationService = observationService;
         this.individualRepository = individualRepository;
-        this.programOutcomeRepository = programOutcomeRepository;
         this.checklistDetailRepository = checklistDetailRepository;
         this.checklistItemDetailRepository = checklistItemDetailRepository;
         this.checklistRepository = checklistRepository;
         this.checklistItemRepository = checklistItemRepository;
         this.identifierAssignmentRepository = identifierAssignmentRepository;
-        this.formMappingRepository = formMappingRepository;
-    }
-
-    @Transactional
-    public ProgramEncounter matchingEncounter(String programEnrolmentUUID, String encounterTypeName, DateTime encounterDateTime) {
-        ProgramEnrolment programEnrolment = programEnrolmentRepository.findByUuid(programEnrolmentUUID);
-        if (programEnrolment == null) {
-            throw new IllegalArgumentException(String.format("ProgramEnrolment not found with UUID '%s'", programEnrolmentUUID));
-        }
-        return programEnrolment.getProgramEncounters().stream()
-                .filter(programEncounter ->
-                        programEncounter.getEncounterType().getName().equals(encounterTypeName)
-                                && programEncounter.dateFallsWithIn(encounterDateTime))
-                .findAny()
-                .orElse(null);
+        this.formMappingService = formMappingService;
+        this.bugsnag = bugsnag;
+        this.subjectMigrationService = subjectMigrationService;
     }
 
     public EnrolmentContract constructEnrolments(String uuid) {
@@ -100,9 +92,9 @@ public class ProgramEnrolmentService implements ScopeAwareService {
         enrolmentContract.setProgramExitDateTime(programEnrolment.getProgramExitDateTime());
         enrolmentContract.setSubjectUuid(programEnrolment.getIndividual().getUuid());
         enrolmentContract.setVoided(programEnrolment.isVoided());
-        Set<ProgramEncountersContract> programEncounters = programEnrolment.nonVoidedEncounters()
-                .map(programEncounter -> programEncounterService.constructProgramEncounters(programEncounter))
-                .collect(Collectors.toSet());
+        Set<ProgramEncounterContract> programEncounters = programEnrolment.nonVoidedEncounters()
+            .map(programEncounterService::constructProgramEncounters)
+            .collect(Collectors.toSet());
         enrolmentContract.setProgramEncounters(programEncounters);
         List<ObservationContract> observationContractsList = observationService.constructObservations(programEnrolment.getObservations());
         enrolmentContract.setObservations(observationContractsList);
@@ -112,28 +104,38 @@ public class ProgramEnrolmentService implements ScopeAwareService {
         return enrolmentContract;
     }
 
-    public Page<ProgramEncountersContract> getAllCompletedEncounters(String uuid, String encounterTypeUuids, DateTime encounterDateTime, DateTime earliestVisitDateTime, Pageable pageable){
-        Page<ProgramEncountersContract> programEncountersContract = null;
+    public Page<ProgramEncounterContract> getAllCompletedEncounters(String uuid, String encounterTypeUuids, DateTime encounterDateTime, DateTime earliestVisitDateTime, Pageable pageable) {
+        Page<ProgramEncounterContract> programEncountersContract;
         List<String> encounterTypeIdList = new ArrayList<>();
-        if(encounterTypeUuids != null) {
+        if (encounterTypeUuids != null) {
             encounterTypeIdList = Arrays.asList(encounterTypeUuids.split(","));
         }
         ProgramEnrolment programEnrolment = programEnrolmentRepository.findByUuid(uuid);
         Specification<ProgramEncounter> completedEncounterSpecification = where(programEncounterRepository.withNotNullEncounterDateTime())
-                .or(programEncounterRepository.withNotNullCancelDateTime())
-                .and(programEncounterRepository.withVoidedFalse());
+            .or(programEncounterRepository.withNotNullCancelDateTime())
+            .and(programEncounterRepository.withVoidedFalse());
+        Pageable unsortedPageable = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize());
         programEncountersContract = programEncounterRepository.findAll(
-                where(programEncounterRepository.withProgramEncounterId(programEnrolment.getId()))
-                        .and(programEncounterRepository.withProgramEncounterTypeIdUuids(encounterTypeIdList))
-                        .and(programEncounterRepository.withProgramEncounterEarliestVisitDateTime(earliestVisitDateTime))
-                        .and(programEncounterRepository.withProgramEncounterDateTime(encounterDateTime))
-                        .and(completedEncounterSpecification)
-                ,pageable).map(programEncounter -> programEncounterService.constructProgramEncounters(programEncounter));
+            where(programEncounterRepository.withProgramEncounterId(programEnrolment.getId()))
+                .and(programEncounterRepository.withProgramEncounterTypeIdUuids(encounterTypeIdList))
+                .and(programEncounterRepository.withProgramEncounterEarliestVisitDateTime(earliestVisitDateTime))
+                .and(programEncounterRepository.withProgramEncounterDateTime(encounterDateTime))
+                .and(completedEncounterSpecification)
+                .and(programEncounterRepository.orderByVisitDateDescIdDesc())
+            , unsortedPageable).map(programEncounterService::constructProgramEncounters);
         return programEncountersContract;
     }
 
+    private void validateProgramEnrolmentSave(ProgramEnrolmentRequest request, ProgramEnrolment programEnrolment, Program program) throws ValidationException {
+        boolean isUndoExit = programEnrolment.getProgramExitDateTime() != null && request.getProgramExitDateTime() == null;
+        if (isUndoExit) {
+            if (alreadyEnrolled(programEnrolment.getIndividual(), program) && !program.isAllowMultipleEnrolments()) {
+                throw new ValidationException("alreadyEnrolledInProgram");
+            }
+        }
+    }
     @Messageable(EntityType.ProgramEnrolment)
-    public ProgramEnrolment programEnrolmentSave(ProgramEnrolmentRequest request){
+    public ProgramEnrolment programEnrolmentSave(ProgramEnrolmentRequest request, boolean validate) throws ValidationException {
         logger.info(String.format("Saving programEnrolment with uuid %s", request.getUuid()));
         Program program;
         if (request.getProgramUUID() == null) {
@@ -141,10 +143,11 @@ public class ProgramEnrolmentService implements ScopeAwareService {
         } else {
             program = programRepository.findByUuid(request.getProgramUUID());
         }
-        ProgramOutcome programOutcome = programOutcomeRepository.findByUuid(request.getProgramOutcomeUUID());
-        ProgramEnrolment programEnrolment = EntityHelper.newOrExistingEntity(programEnrolmentRepository,request, new ProgramEnrolment());
+        Decisions decisions = request.getDecisions();
+        observationService.validateObservationsAndDecisions(request.getObservations(), decisions != null ? decisions.getEnrolmentDecisions() : null, formMappingService.find(program, FormType.ProgramEnrolment));
+        ProgramEnrolment programEnrolment = EntityHelper.newOrExistingEntity(programEnrolmentRepository, request, new ProgramEnrolment());
+        if (validate) validateProgramEnrolmentSave(request, programEnrolment, program);
         programEnrolment.setProgram(program);
-        programEnrolment.setProgramOutcome(programOutcome);
         programEnrolment.setEnrolmentDateTime(request.getEnrolmentDateTime());
         programEnrolment.setProgramExitDateTime(request.getProgramExitDateTime());
         PointRequest enrolmentLocation = request.getEnrolmentLocation();
@@ -153,35 +156,58 @@ public class ProgramEnrolmentService implements ScopeAwareService {
         PointRequest exitLocation = request.getExitLocation();
         if (exitLocation != null)
             programEnrolment.setExitLocation(new Point(exitLocation.getX(), exitLocation.getY()));
-        programEnrolment.setObservations(observationService.createObservations(request.getObservations()));
-        programEnrolment.setProgramExitObservations(observationService.createObservations(request.getProgramExitObservations()));
 
-        Decisions decisions = request.getDecisions();
-        if(decisions != null) {
+        // Temporary fix to
+        if ((request.getObservations() == null || request.getObservations().isEmpty()) && programEnrolment.getObservations() != null && !programEnrolment.getObservations().isEmpty()) {
+            String errorMessage = String.format("ProgramEnrolment Observations not all allowed to be made empty. User: %s, UUID: %s, ", UserContextHolder.getUser().getUsername(), request.getUuid());
+            bugsnag.notify(new Exception(errorMessage));
+            logger.error(errorMessage);
+            programEnrolment.updateAudit();
+        } else {
+            programEnrolment.setObservations(observationService.createObservations(request.getObservations()));
+        }
+
+        if ((request.getProgramExitObservations() == null || request.getProgramExitObservations().isEmpty()) && programEnrolment.getProgramExitObservations() != null && !programEnrolment.getProgramExitObservations().isEmpty()) {
+            String errorMessage = String.format("ProgramEnrolment Exit Observations not all allowed to be made empty. User: %s, UUID: %s, ", UserContextHolder.getUser().getUsername(), request.getUuid());
+            bugsnag.notify(new Exception(errorMessage));
+            logger.error(errorMessage);
+            programEnrolment.updateAudit();
+        } else {
+            programEnrolment.setProgramExitObservations(observationService.createObservations(request.getProgramExitObservations()));
+        }
+
+        Individual individual = individualRepository.findByUuid(request.getIndividualUUID());
+
+        if (decisions != null) {
             ObservationCollection observationsFromDecisions = observationService
-                    .createObservationsFromDecisions(decisions.getEnrolmentDecisions());
-            if(decisions.isExit()) {
+                .createObservationsFromDecisions(decisions.getEnrolmentDecisions());
+            if (decisions.isExit()) {
                 programEnrolment.getProgramExitObservations().putAll(observationsFromDecisions);
             } else {
                 programEnrolment.getObservations().putAll(observationsFromDecisions);
             }
+
+            List<Decision> registrationDecisions = decisions.getRegistrationDecisions();
+            if (registrationDecisions != null) {
+                ObservationCollection registrationObservations = observationService.createObservationsFromDecisions(registrationDecisions);
+                subjectMigrationService.applyRegistrationDecisionsAndPropagate(individual, registrationObservations);
+            }
         }
 
-        Individual individual = individualRepository.findByUuid(request.getIndividualUUID());
         programEnrolment.setIndividual(individual);
         this.addSyncAttributes(programEnrolment);
         if (programEnrolment.isNew()) {
             programEnrolment.setIndividual(individual);
             saveIdentifierAssignments(programEnrolment, request);
         }
-        programEnrolment = programEnrolmentRepository.save(programEnrolment);
+        programEnrolment = programEnrolmentRepository.saveEntity(programEnrolment);
 
         if (request.getVisitSchedules() != null && request.getVisitSchedules().size() > 0) {
             programEncounterService.saveVisitSchedules(request.getUuid(), request.getVisitSchedules(), null);
         }
         if (request.getChecklists() != null && request.getChecklists().size() > 0) {
             request.getChecklists()
-                    .forEach(checklist -> saveChecklist(checklist, request.getUuid()));
+                .forEach(checklist -> saveChecklist(checklist, request.getUuid()));
         }
 
         logger.info(String.format("Saved programEnrolment with uuid %s", request.getUuid()));
@@ -191,7 +217,7 @@ public class ProgramEnrolmentService implements ScopeAwareService {
     @Messageable(EntityType.ProgramEnrolment)
     public ProgramEnrolment save(ProgramEnrolment programEnrolment) {
         this.addSyncAttributes(programEnrolment);
-       return programEnrolmentRepository.save(programEnrolment);
+        return programEnrolmentRepository.saveEntity(programEnrolment);
     }
 
     private void addSyncAttributes(ProgramEnrolment enrolment) {
@@ -204,7 +230,7 @@ public class ProgramEnrolmentService implements ScopeAwareService {
 
     private void saveIdentifierAssignments(ProgramEnrolment programEnrolment, ProgramEnrolmentRequest programEnrolmentRequest) {
         List<String> identifierAssignmentUuids = programEnrolmentRequest.getIdentifierAssignmentUuids();
-        if(identifierAssignmentUuids != null) {
+        if (identifierAssignmentUuids != null) {
             identifierAssignmentUuids.forEach(uuid -> {
                 IdentifierAssignment identifierAssignment = identifierAssignmentRepository.findByUuid(uuid);
                 identifierAssignment.setProgramEnrolment(programEnrolment);
@@ -213,12 +239,12 @@ public class ProgramEnrolmentService implements ScopeAwareService {
         }
     }
 
-    private Checklist saveChecklist(ChecklistContract checklistContract, String programEnrolmentUUID){
+    private Checklist saveChecklist(ChecklistContract checklistContract, String programEnrolmentUUID) {
         ProgramEnrolment programEnrolment = programEnrolmentRepository.findByUuid(programEnrolmentUUID);
         Checklist existingChecklist = checklistRepository.findByProgramEnrolmentId(programEnrolment.getId());
         if (existingChecklist != null) {
             existingChecklist.setBaseDate(checklistContract.getBaseDate());
-            return checklistRepository.save(existingChecklist);
+            return checklistRepository.saveEntity(existingChecklist);
         }
         Checklist checklist = new Checklist();
         checklist.assignUUIDIfRequired();
@@ -227,7 +253,7 @@ public class ProgramEnrolmentService implements ScopeAwareService {
         checklist.setBaseDate(checklistContract.getBaseDate());
         checklist.setChecklistDetail(checklistDetail);
         checklist.setProgramEnrolment(programEnrolment);
-        Checklist savedChecklist = checklistRepository.save(checklist);
+        Checklist savedChecklist = checklistRepository.saveEntity(checklist);
         checklistContract.getItems().forEach(item -> {
             ChecklistItem checklistItem = new ChecklistItem();
             checklistItem.assignUUIDIfRequired();
@@ -235,43 +261,34 @@ public class ProgramEnrolmentService implements ScopeAwareService {
             ChecklistItemDetail checklistItemDetail = checklistItemDetailRepository.findByUuid(checklistItemDetailUUID);
             checklistItem.setChecklistItemDetail(checklistItemDetail);
             checklistItem.setChecklist(savedChecklist);
-            checklistItemRepository.save(checklistItem);
+            checklistItemRepository.saveEntity(checklistItem);
         });
         return savedChecklist;
     }
 
     @Messageable(EntityType.ProgramEnrolment)
     public ProgramEnrolment voidEnrolment(ProgramEnrolment programEnrolment) {
-        assertNoUnVoidedProgramEncounters(programEnrolment);
         programEnrolment.setVoided(true);
-        return programEnrolmentRepository.save(programEnrolment);
-    }
-
-    private void assertNoUnVoidedProgramEncounters(ProgramEnrolment programEnrolment) {
-        long unVoidedProgramEncounters = programEnrolment.nonVoidedEncounters().count();
-        if (unVoidedProgramEncounters != 0) {
-            String programName = programEnrolment.getProgram().getName();
-            throw new BadRequestError(String.format("There are non deleted program encounters for the program %s", programName));
-        }
+        return programEnrolmentRepository.saveEntity(programEnrolment);
     }
 
     @Override
     public boolean isScopeEntityChanged(DateTime lastModifiedDateTime, String programUUID) {
         return true;
-//        Program program = programRepository.findByUuid(programUUID);
-//        FormMapping formMapping = formMappingRepository.getAllProgramEnrolmentFormMappings()
-//                .stream()
-//                .filter(fm -> fm.getProgramUuid().equals(programUUID))
-//                .findFirst()
-//                .orElse(null);
-//        User user = UserContextHolder.getUserContext().getUser();
-//        return program != null &&
-//                formMapping != null &&
-//                isChanged(user, lastModifiedDateTime, program.getId(), formMapping.getSubjectType());
     }
 
     @Override
-    public OperatingIndividualScopeAwareRepository repository() {
+    public OperatingIndividualScopeAwareRepository<ProgramEnrolment> repository() {
         return programEnrolmentRepository;
+    }
+
+    public FormMapping getFormMapping(ProgramEnrolment programEnrolment) {
+        FormType formType = programEnrolment.isExited() ? FormType.ProgramExit : FormType.ProgramEnrolment;
+        return formMappingService.findBy(programEnrolment.getIndividual().getSubjectType(), programEnrolment.getProgram(), null, formType);
+    }
+
+    public boolean alreadyEnrolled(Individual individual, Program program) {
+        List<ProgramEnrolment> existingEnrolments = programEnrolmentRepository.findByIndividualAndProgram(individual, program);
+        return existingEnrolments.stream().anyMatch(ProgramEnrolment::isActive);
     }
 }

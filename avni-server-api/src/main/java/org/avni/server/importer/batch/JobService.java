@@ -1,11 +1,11 @@
 package org.avni.server.importer.batch;
 
-import org.avni.server.service.ObjectInfo;
-import org.joda.time.DateTime;
+import org.springframework.transaction.annotation.Transactional;
+import jakarta.validation.constraints.NotNull;
 import org.avni.server.dao.AvniJobRepository;
 import org.avni.server.dao.JobStatus;
 import org.avni.server.framework.security.UserContextHolder;
-import org.avni.server.service.UserService;
+import org.avni.server.service.ObjectInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.*;
@@ -20,10 +20,9 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
-import javax.transaction.Transactional;
-import javax.validation.constraints.NotNull;
+import java.time.LocalDateTime;
 import java.util.Arrays;
-import java.util.Date;
+import java.util.Objects;
 
 import static java.lang.String.format;
 import static org.springframework.batch.core.BatchStatus.*;
@@ -51,16 +50,16 @@ public class JobService {
     public void retryJobsFailedInLast2Hours() throws JobExecutionAlreadyRunningException, JobRestartException, JobInstanceAlreadyCompleteException, JobParametersInvalidException {
         for (JobExecution jobExecution : jobExplorer.findRunningJobExecutions(importJob.getName())) {
             BatchStatus status = jobExecution.getStatus();
-            Date lastUpdated = jobExecution.getLastUpdated();
-            Date nowMinus2Hours = new DateTime().minusHours(2).toDate();
-            if (nowMinus2Hours.before(lastUpdated) && Arrays.asList(STARTING, STARTED, UNKNOWN).contains(status)) {
-                jobExecution.upgradeStatus(BatchStatus.FAILED);
-                jobExecution.setEndTime(new Date());
+            LocalDateTime lastUpdated = jobExecution.getLastUpdated();
+            LocalDateTime nowMinus2Hours = LocalDateTime.now().minusHours(2);
+            if (nowMinus2Hours.isBefore(lastUpdated) && Arrays.asList(STARTING, STARTED, UNKNOWN).contains(status)) {
+                jobExecution.upgradeStatus(FAILED);
+                jobExecution.setEndTime(LocalDateTime.now());
                 jobRepository.update(jobExecution);
                 for (StepExecution stepExecution : jobExecution.getStepExecutions()) {
                     if (Arrays.asList(STARTING, STARTED, UNKNOWN).contains(stepExecution.getStatus())) {
-                        stepExecution.upgradeStatus(BatchStatus.FAILED);
-                        stepExecution.setEndTime(new Date());
+                        stepExecution.upgradeStatus(FAILED);
+                        stepExecution.setEndTime(LocalDateTime.now());
                         jobRepository.update(stepExecution);
                     }
                 }
@@ -69,8 +68,8 @@ public class JobService {
         }
     }
 
-    public JobExecution create(String uuid, String type, String fileName, ObjectInfo s3FileInfo, Long userId, String organisationUUID, boolean autoApprove, String locationUploadMode) throws JobParametersInvalidException, JobExecutionAlreadyRunningException, JobRestartException, JobInstanceAlreadyCompleteException {
-        JobParameters parameters = new JobParametersBuilder()
+    public JobExecution create(String uuid, String type, String fileName, ObjectInfo s3FileInfo, Long userId, String organisationUUID, boolean autoApprove, String locationUploadMode, String locationHierarchy, String encounterUploadMode, String programEnrolmentUploadMode) throws JobParametersInvalidException, JobExecutionAlreadyRunningException, JobRestartException, JobInstanceAlreadyCompleteException {
+        JobParametersBuilder jobParametersBuilder = new JobParametersBuilder()
                 .addString("organisationUUID", organisationUUID)
                 .addString("uuid", uuid)
                 .addString("fileName", fileName, false)
@@ -78,15 +77,26 @@ public class JobService {
                 .addLong("noOfLines", s3FileInfo.getNoOfLines(), false)
                 .addLong("userId", userId, false)
                 .addString("type", type, false)
-                .addString("autoApprove", String.valueOf(autoApprove))
-                .addString("locationUploadMode", locationUploadMode)
-                .toJobParameters();
-        logger.info(format("Bulkupload initiated! Job{type='%s',uuid='%s',fileName='%s'}", type, uuid, fileName));
+                .addString("autoApprove", String.valueOf(autoApprove));
+        if (Objects.nonNull(locationUploadMode)) {
+            jobParametersBuilder.addString("locationUploadMode", locationUploadMode);
+        }
+        if (Objects.nonNull(locationHierarchy)) {
+            jobParametersBuilder.addString("locationHierarchy", locationHierarchy);
+        }
+        if (Objects.nonNull(encounterUploadMode)) {
+            jobParametersBuilder.addString("encounterUploadMode", encounterUploadMode);
+        }
+        if (Objects.nonNull(programEnrolmentUploadMode)) {
+            jobParametersBuilder.addString("programEnrolmentUploadMode", programEnrolmentUploadMode);
+        }
+        JobParameters jobParameters = jobParametersBuilder.toJobParameters();
+        logger.info(format("Bulk upload initiated! Job{type='%s',uuid='%s',fileName='%s'}", type, uuid, fileName));
 
-        return type.equals("metadataZip") ? bgJobLauncher.run(importZipJob, parameters) : bgJobLauncher.run(importJob, parameters);
+        return type.equals("metadataZip") ? bgJobLauncher.run(importZipJob, jobParameters) : bgJobLauncher.run(importJob, jobParameters);
     }
 
-    @Transactional
+    @Transactional(readOnly = true)
     public Page<JobStatus> getAll(@NotNull Pageable pageable) {
         String jobFilterCondition = " and subjectTypeUUID = '' ";
         return avniJobRepository.getJobStatuses(UserContextHolder.getUser(), jobFilterCondition, pageable);

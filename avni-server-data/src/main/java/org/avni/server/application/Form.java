@@ -1,0 +1,275 @@
+package org.avni.server.application;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import org.avni.server.domain.Concept;
+import org.avni.server.domain.ConceptDataType;
+import org.avni.server.domain.DeclarativeRule;
+import org.avni.server.domain.JsonObject;
+import org.avni.server.domain.OrganisationAwareEntity;
+import org.avni.server.framework.hibernate.DeclarativeRuleUserType;
+import org.avni.server.framework.hibernate.JSONObjectUserType;
+import org.hibernate.annotations.Type;
+
+import jakarta.persistence.*;
+import jakarta.validation.constraints.NotNull;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Entity
+@Table(name = "form")
+public class Form extends OrganisationAwareEntity {
+    @NotNull
+    @Enumerated(EnumType.STRING)
+    private FormType formType;
+
+    // @NotNull
+    private String name;
+
+    @OneToMany(fetch = FetchType.LAZY, cascade = CascadeType.ALL, orphanRemoval = true, mappedBy = "form")
+    private Set<FormElementGroup> formElementGroups = new HashSet<>();
+
+    @Column(name = "decision_rule")
+    private String decisionRule;
+
+    @Column(name = "edit_form_rule")
+    private String editFormRule;
+
+    @Column(name = "visit_schedule_rule")
+    private String visitScheduleRule;
+
+    @Column(name = "validation_rule")
+    private String validationRule;
+
+    @Column(name = "checklists_rule")
+    private String checklistsRule;
+
+    @Column(name = "validation_declarative_rule")
+    @Type(value = DeclarativeRuleUserType.class)
+    private DeclarativeRule validationDeclarativeRule;
+
+    @Column(name = "decision_declarative_rule")
+    @Type(value = DeclarativeRuleUserType.class)
+    private DeclarativeRule decisionDeclarativeRule;
+
+    @Column(name = "visit_schedule_declarative_rule")
+    @Type(value = DeclarativeRuleUserType.class)
+    private DeclarativeRule visitScheduleDeclarativeRule;
+
+    @Column(name = "task_schedule_rule")
+    private String taskScheduleRule;
+
+    @Column(name = "task_schedule_declarative_rule")
+    @Type(value = DeclarativeRuleUserType.class)
+    private DeclarativeRule taskScheduleDeclarativeRule;
+
+    @Column(name = "share_rule")
+    private String shareRule;
+
+    @Column(name = "share_template_s3_key")
+    private String shareTemplateS3Key;
+
+    @Column(name = "share_translations")
+    @Type(value = JSONObjectUserType.class)
+    private JsonObject shareTranslations;
+
+    @OneToMany(fetch = FetchType.LAZY, cascade = CascadeType.ALL, orphanRemoval = true, mappedBy = "form")
+    private Set<DecisionConcept> decisionConcepts = new HashSet<>();
+
+    public Form() {
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public Set<FormElementGroup> getFormElementGroups() {
+        return formElementGroups;
+    }
+
+    public FormType getFormType() {
+        return formType;
+    }
+
+    public void setFormType(FormType formType) {
+        this.formType = formType;
+    }
+
+    public static Form create() {
+        Form form = new Form();
+        form.formElementGroups = new HashSet<>();
+        return form;
+    }
+
+    public FormElementGroup addFormElementGroup(FormElementGroup formElementGroup) {
+        this.formElementGroups.add(formElementGroup);
+        if (formElementGroup.getUuid() == null) {
+            formElementGroup.assignUUID();
+        }
+        return formElementGroup;
+    }
+
+    public FormElementGroup findFormElementGroup(String uuid) {
+        return formElementGroups.stream().filter(x -> x.getUuid().equals(uuid)).findAny().orElse(null);
+    }
+
+    @JsonIgnore
+    public List<FormElement> getAllFormElements() {
+        return formElementGroups.stream()
+                .sorted(Comparator.comparing(FormElementGroup::getDisplayOrder))
+                .map(FormElementGroup::getFormElements)
+                .map(x -> x.stream().sorted(Comparator.comparing(FormElement::getDisplayOrder)))
+                .map(x -> x.collect(Collectors.toList()))
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
+    }
+
+    @JsonIgnore
+    public List<FormElement> getApplicableFormElements() {
+        return getAllFormElements().stream().filter(fe->!fe.isVoided()).collect(Collectors.toList());
+    }
+
+    @JsonIgnore
+    public List<FormElement> getAllCodedFormElements() {
+        return getApplicableFormElements().stream().filter(fe -> fe.getConcept().isCoded()).collect(Collectors.toList());
+    }
+
+    public String getDecisionRule() {
+        return decisionRule;
+    }
+
+    public void setDecisionRule(String decisionRule) {
+        this.decisionRule = decisionRule;
+    }
+
+    public String getVisitScheduleRule() {
+        return visitScheduleRule;
+    }
+
+    public void setVisitScheduleRule(String visitScheduleRule) {
+        this.visitScheduleRule = visitScheduleRule;
+    }
+
+    public String getValidationRule() {
+        return validationRule;
+    }
+
+    public void setValidationRule(String validationRule) {
+        this.validationRule = validationRule;
+    }
+
+    public DeclarativeRule getValidationDeclarativeRule() {
+        return validationDeclarativeRule;
+    }
+
+    public void setValidationDeclarativeRule(DeclarativeRule validationDeclarativeRule) {
+        this.validationDeclarativeRule = validationDeclarativeRule;
+    }
+
+    public DeclarativeRule getDecisionDeclarativeRule() {
+        return decisionDeclarativeRule;
+    }
+
+    public void setDecisionDeclarativeRule(DeclarativeRule decisionDeclarativeRule) {
+        this.decisionDeclarativeRule = decisionDeclarativeRule;
+    }
+
+    public DeclarativeRule getVisitScheduleDeclarativeRule() {
+        return visitScheduleDeclarativeRule;
+    }
+
+    public void setVisitScheduleDeclarativeRule(DeclarativeRule visitScheduleDeclarativeRule) {
+        this.visitScheduleDeclarativeRule = visitScheduleDeclarativeRule;
+    }
+
+    public String getChecklistsRule() {
+        return checklistsRule;
+
+    }
+
+    public void setChecklistsRule(String checklistsRule) {
+        this.checklistsRule = checklistsRule;
+    }
+
+    public Set<Concept> getDecisionConcepts() {
+        return this.decisionConcepts.stream().map(DecisionConcept::getConcept).collect(Collectors.toSet());
+    }
+
+    public void addDecisionConcept(Concept concept) {
+        DecisionConcept decisionConcept = new DecisionConcept();
+        decisionConcept.setConcept(concept);
+        decisionConcept.setForm(this);
+        this.decisionConcepts.add(decisionConcept);
+    }
+
+    public boolean hasDecisionConcept(String conceptUUID) {
+        return getDecisionConcept(conceptUUID) != null;
+    }
+
+    private DecisionConcept getDecisionConcept(String conceptUUID) {
+        return this.decisionConcepts.stream().filter(decisionConcept -> decisionConcept.getConcept().getUuid().equals(conceptUUID)).findFirst().orElse(null);
+    }
+
+    public void removeDecisionConcept(Concept concept) {
+        DecisionConcept decisionConcept = getDecisionConcept(concept.getUuid());
+        this.decisionConcepts.remove(decisionConcept);
+    }
+
+    public String getTaskScheduleRule() {
+        return taskScheduleRule;
+    }
+
+    public void setTaskScheduleRule(String taskScheduleRule) {
+        this.taskScheduleRule = taskScheduleRule;
+    }
+
+    public DeclarativeRule getTaskScheduleDeclarativeRule() {
+        return taskScheduleDeclarativeRule;
+    }
+
+    public void setTaskScheduleDeclarativeRule(DeclarativeRule taskScheduleDeclarativeRule) {
+        this.taskScheduleDeclarativeRule = taskScheduleDeclarativeRule;
+    }
+
+    public List<FormElement> getAllElements(ConceptDataType conceptDataType) {
+        return formElementGroups.stream()
+                .map(FormElementGroup::getFormElements)
+                .flatMap(Collection::stream)
+                .filter(formElement -> formElement.getConcept().getDataType().equals(conceptDataType.name())).collect(Collectors.toList());
+    }
+
+    public String getEditFormRule() {
+        return editFormRule;
+    }
+
+    public void setEditFormRule(String editFormRule) {
+        this.editFormRule = editFormRule;
+    }
+
+    public String getShareRule() {
+        return shareRule;
+    }
+
+    public void setShareRule(String shareRule) {
+        this.shareRule = shareRule;
+    }
+
+    public String getShareTemplateS3Key() {
+        return shareTemplateS3Key;
+    }
+
+    public void setShareTemplateS3Key(String shareTemplateS3Key) {
+        this.shareTemplateS3Key = shareTemplateS3Key;
+    }
+
+    public JsonObject getShareTranslations() {
+        return shareTranslations;
+    }
+
+    public void setShareTranslations(JsonObject shareTranslations) {
+        this.shareTranslations = shareTranslations;
+    }
+}

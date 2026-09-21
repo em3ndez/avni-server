@@ -8,51 +8,46 @@ import org.avni.server.dao.SubjectTypeRepository;
 import org.avni.server.domain.ConceptDataType;
 import org.avni.server.domain.SubjectType;
 import org.avni.server.framework.ApplicationContextProvider;
+import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.service.OrganisationConfigService;
 import org.avni.server.util.ObjectMapperSingleton;
 import org.avni.server.util.S;
 import org.avni.server.web.request.webapp.search.*;
+import org.joda.time.LocalDate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.util.StringUtils;
 
+import java.math.BigDecimal;
 import java.util.*;
 import java.util.stream.Collectors;
 
 public class BaseSubjectSearchQueryBuilder<T> {
     private final Logger logger;
 
-    protected static final String ENCOUNTER_JOIN = "left outer join encounter e\n" +
-            "                         on i.id = e.individual_id and\n" +
-            "                            e.encounter_date_time is not null and\n" +
-            "                            e.is_voided is false";
-    protected static final String PROGRAM_ENROLMENT_JOIN = "left outer join program_enrolment penr on i.id = penr.individual_id and penr.is_voided is false";
-    protected static final String PROGRAM_ENCOUNTER_JOIN = "left outer join program_encounter pe\n" +
-            "                         on penr.id = pe.program_enrolment_id and\n" +
-            "                            pe.encounter_date_time is not null and\n" +
-            "                            pe.is_voided is false";
-    private static final String ADDRESS_LEVEL_JOIN = "left outer join address_level al on al.id = i.address_id";
+    protected static final String ENCOUNTER_FILTER = "i.id in (select e.individual_id from encounter e where e.encounter_date_time is not null and e.is_voided is false\n";
+    protected static final String PROGRAM_ENROLMENT_FILTER = "i.id in (select penr.individual_id from program_enrolment penr where penr.enrolment_date_time is not null and penr.is_voided is false\n";
+    protected static final String PROGRAM_ENCOUNTER_FILTER = "i.id in (select penr.individual_id from program_enrolment penr join program_encounter penc on penc.program_enrolment_id = penr.id where penc.encounter_date_time is not null and penc.is_voided is false and penr.is_voided is false\n";
+    protected static final String ADDRESS_FILTER = "i.address_id in (select al.id from address_level al where 1=1\n";
+    protected static final String SEARCH_ALL_FILTER = "i.id in (select i.id from individual i join program_enrolment penr on penr.individual_id = i.id and penr.is_voided is false\n";
 
-    private String offsetLimitClause = "offset :offset limit :limit";
-    private String orderByClause = "\norder by i.id desc\n";
+    private String orderByClause = "";
 
-
-    private Set<String> whereClauses = new HashSet<>();
-    private Set<String> joinClauses = new LinkedHashSet<>();
-    private Map<String, Object> parameters = new HashMap<>();
+    protected final Set<String> whereClauses = new HashSet<>();
+    private final Map<String, Object> parameters = new HashMap<>();
     private boolean forCount;
-    private Set<String> customFields = new HashSet<>();
+    private final Set<String> customFields = new HashSet<>();
 
     public BaseSubjectSearchQueryBuilder() {
         logger = LoggerFactory.getLogger(this.getClass());
     }
 
     public SqlQuery buildUsingBaseQuery(String baseQuery, String groupByClause) {
-        StringBuffer query = new StringBuffer();
+        StringBuilder query = new StringBuilder();
         query.append(baseQuery);
-        query.append(String.join(" \n ", joinClauses));
-        if (!whereClauses.isEmpty()) {
-            query.append("\n where \n");
-        }
+
+        query.append(String.format("\n where i.organisation_id = %d and\n", UserContextHolder.getOrganisation().getId()));
+
         query.append(String.join(" \nand ", whereClauses));
         query.append(groupByClause);
         if (parameters.get("offset") == null || parameters.get("limit") == null) {
@@ -61,9 +56,10 @@ public class BaseSubjectSearchQueryBuilder<T> {
 
         String finalQuery = "";
         if (forCount) {
-            finalQuery = "select count(*) from (" + query.toString() + ") a";
+            finalQuery = "select count(*) from (" + query + ") a";
             removePaginationFilters();
         } else {
+            String offsetLimitClause = "offset :offset limit :limit";
             finalQuery = query.append("\n")
                     .append(orderByClause)
                     .append("\n")
@@ -72,7 +68,7 @@ public class BaseSubjectSearchQueryBuilder<T> {
         }
         String customFieldString = customFields.isEmpty() ? "" : ",\n".concat(String.join(",\n", customFields));
         String queryWithCustomFields = finalQuery.replace(" $CUSTOM_FIELDS", customFieldString);
-        logger.debug(parameters.toString());
+        logger.trace(parameters.toString());
         return new SqlQuery(queryWithCustomFields, parameters);
     }
 
@@ -98,11 +94,8 @@ public class BaseSubjectSearchQueryBuilder<T> {
         parameters.put("limit", limit);
 
         String sortColumn = pageElement.getSortColumn();
-        if (sortColumn != null && !sortColumn.isEmpty()) {
-            String sortOrder = pageElement.getSortOrder();
-            if (sortOrder == null) {
-                sortOrder = "asc";
-            }
+        if (!StringUtils.isEmpty(sortColumn)) {
+            SortOrder sortOrder = Optional.ofNullable(pageElement.getSortOrder()).orElse(SortOrder.asc);
 
             Map<String, String> columnsMap = new HashMap<String, String>() {
                 {
@@ -112,13 +105,11 @@ public class BaseSubjectSearchQueryBuilder<T> {
                     put("GENDER", "gender.name");
                     put("DATEOFBIRTH", "i.date_of_birth");
                     put("TITLE_LINEAGE", "tllv.title_lineage");
-
                 }
             };
 
-            this.orderByClause = "order by " + columnsMap.get(sortColumn.toUpperCase()) + " " + sortOrder + ", i.id desc";
+            this.orderByClause = "order by " + columnsMap.get(sortColumn.toUpperCase()) + " " + sortOrder.name() + ", i.id desc";
         }
-
 
         return (T) this;
     }
@@ -162,7 +153,7 @@ public class BaseSubjectSearchQueryBuilder<T> {
     }
 
     public T withNameFilter(String name) {
-        if (name != null && !name.isEmpty()) {
+        if (!StringUtils.isEmpty(name)) {
             String[] tokens = name.split("\\s+");
             StringBuffer whereClause = new StringBuffer();
             whereClause.append("(");
@@ -189,18 +180,18 @@ public class BaseSubjectSearchQueryBuilder<T> {
         return (T) this;
     }
 
+    public T withDateOfBirthFilter(LocalDate dateOfBirth) {
+        if (dateOfBirth == null) return (T) this;
+        addParameter("dateOfBirth", dateOfBirth.toString());
+        whereClauses.add("i.date_of_birth = cast(:dateOfBirth as date)");
+        return (T) this;
+    }
+
     public T withGenderFilter(List<String> genders) {
         if (genders == null || genders.isEmpty()) return (T) this;
         String parameter = "genders";
         addParameter(parameter, genders);
         whereClauses.add("gender.uuid in :genders");
-        return (T) this;
-    }
-
-    public T withSubjectTypeFilter(String subjectType) {
-        if (subjectType == null) return (T) this;
-        addParameter("subjectTypeUuid", subjectType);
-        whereClauses.add("st.uuid = :subjectTypeUuid");
         return (T) this;
     }
 
@@ -210,7 +201,7 @@ public class BaseSubjectSearchQueryBuilder<T> {
         return withRangeFilter(registrationDateRange,
                 "registrationDate",
                 "i.registration_date >= cast(:rangeParam as date)",
-                "i.registration_date <= cast(:rangeParam as date)");
+                "i.registration_date <= cast(:rangeParam as date)", "");
     }
 
     public T withIncludeVoidedFilter(Boolean includeVoided) {
@@ -223,22 +214,40 @@ public class BaseSubjectSearchQueryBuilder<T> {
 
     public T withAddressIdsFilter(List<Integer> addressIds) {
         if (addressIds == null || addressIds.isEmpty()) return (T) this;
-        joinClauses.add(ADDRESS_LEVEL_JOIN);
         String addressIdString = addressIds.stream().map(String::valueOf)
                 .collect(Collectors.joining("|"));
         parameters.put("addressLQuery", String.format("*.%s.*", addressIdString));
-        whereClauses.add("al.lineage ~ cast(:addressLQuery as lquery)");
+        whereClauses.add(generateWhereClause(ADDRESS_FILTER, "al.lineage ~ cast(:addressLQuery as lquery)"));
         return (T) this;
     }
 
     public T withSearchAll(String searchString) {
-        if (searchString == null || searchString.isEmpty()) return (T) this;
+        if (StringUtils.isEmpty(searchString)) return (T) this;
         String searchValue = "%" + searchString + "%";
         parameters.put("searchAll", searchValue);
-        whereClauses.add("(cast(i.observations as text) ilike :searchAll\n" +
-                " or cast(penr.observations as text) ilike :searchAll)");
-        joinClauses.add(PROGRAM_ENROLMENT_JOIN);
+        whereClauses.add(generateWhereClause(SEARCH_ALL_FILTER, "(cast(i.observations as text) ilike :searchAll or cast(penr.observations as text) ilike :searchAll)"));
         return (T) this;
+    }
+
+    private String getFilterForSearchScope(String searchScope) {
+        if (searchScope.equalsIgnoreCase("encounter")) {
+            return ENCOUNTER_FILTER;
+        }
+        if (searchScope.equalsIgnoreCase("programEnrolment")) {
+            return PROGRAM_ENROLMENT_FILTER;
+        }
+        if (searchScope.equalsIgnoreCase("programEncounter")) {
+            return PROGRAM_ENCOUNTER_FILTER;
+        }
+        return "";
+    }
+
+    protected String generateWhereClause(String filterWithDefaultConditions, String moreConditions) {
+        if (!StringUtils.isEmpty(filterWithDefaultConditions)) {
+            return filterWithDefaultConditions + " and " + moreConditions + ")";
+        } else {
+            return moreConditions;
+        }
     }
 
     public T withConceptsFilter(List<Concept> concept) {
@@ -247,9 +256,8 @@ public class BaseSubjectSearchQueryBuilder<T> {
             {
                 put("REGISTRATION", "i");
                 put("PROGRAMENROLMENT", "penr");
-                put("PROGRAMENCOUNTER", "pe");
+                put("PROGRAMENCOUNTER", "penc");
                 put("ENCOUNTER", "e");
-
             }
         };
 
@@ -258,16 +266,6 @@ public class BaseSubjectSearchQueryBuilder<T> {
             String conceptUuidParam = "conceptUuid" + ci;
             addParameter(conceptUuidParam, c.getUuid());
             String tableAlias = aliasMap.get(c.getSearchScope().toUpperCase());
-            if (c.getSearchScope().equalsIgnoreCase("encounter")) {
-                joinClauses.add(ENCOUNTER_JOIN);
-            }
-            if (c.getSearchScope().equalsIgnoreCase("programEnrolment")) {
-                joinClauses.add(PROGRAM_ENROLMENT_JOIN);
-            }
-            if (c.getSearchScope().equalsIgnoreCase("programEncounter")) {
-                joinClauses.add(PROGRAM_ENROLMENT_JOIN);
-                joinClauses.add(PROGRAM_ENCOUNTER_JOIN);
-            }
 
             if (c.getDataType().equalsIgnoreCase("CODED")) {
                 List<String> conditions = new ArrayList<>();
@@ -283,57 +281,57 @@ public class BaseSubjectSearchQueryBuilder<T> {
                     conditions.add(sql);
                 }
                 String codedFilter = String.join(" or ", conditions);
-                whereClauses.add("(" + codedFilter + ")");
+                whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()), "(" + codedFilter + ")"));
             }
 
-            if (c.getDataType().equalsIgnoreCase("TEXT")) {
+            if (c.getDataType().equalsIgnoreCase("TEXT") || c.getDataType().equalsIgnoreCase("ID")) {
                 String value = "%" + c.getValue() + "%";
                 String param = "textValue" + ci;
                 addParameter(param, value);
-                whereClauses.add(tableAlias + ".observations->> :" + conceptUuidParam + " ilike :" + param);
+                whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()), tableAlias + ".observations->> :" + conceptUuidParam + " ilike :" + param));
             }
 
             if (c.getDataType().equalsIgnoreCase("NUMERIC")) {
                 if (c.getWidget() != null && c.getWidget().equalsIgnoreCase("RANGE")) {
-                    if (c.getMinValue() != null && !c.getMinValue().isEmpty()) {
-                        Float value = Float.parseFloat(c.getMinValue());
+                    if (!StringUtils.isEmpty(c.getMinValue())) {
+                        BigDecimal value = new BigDecimal(c.getMinValue());
                         String param = "numericValueMin" + ci;
                         addParameter(param, value);
-                        whereClauses.add("cast(" + tableAlias + ".observations ->> :" + conceptUuidParam + " as numeric)  >= :" + param);
+                        whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()),"cast(" + tableAlias + ".observations ->> :" + conceptUuidParam + " as numeric)  >= :" + param));
                     }
-                    if (c.getMaxValue() != null && !c.getMaxValue().isEmpty()) {
-                        Float value = Float.parseFloat(c.getMaxValue());
+                    if (!StringUtils.isEmpty(c.getMaxValue())) {
+                        BigDecimal value = new BigDecimal(c.getMaxValue());
                         String param = "numericValueMax" + ci;
                         addParameter(param, value);
-                        whereClauses.add("cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as numeric)  <= :" + param);
+                        whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()),"cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as numeric)  <= :" + param));
                     }
                 } else {
-                    Float value = Float.parseFloat(c.getMinValue());
+                    BigDecimal value = new BigDecimal(c.getMinValue());
                     String param = "numericValueMin" + ci;
                     addParameter(param, value);
-                    whereClauses.add("cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as numeric)  = :" + param);
+                    whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()),"cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as numeric)  = :" + param));
                 }
             }
 
             if (c.getDataType().equalsIgnoreCase("DATE")) {
                 if (c.getWidget() != null && c.getWidget().equalsIgnoreCase("RANGE")) {
-                    if (c.getMinValue() != null && !c.getMinValue().isEmpty()) {
+                    if (!StringUtils.isEmpty(c.getMinValue())) {
                         String value = c.getMinValue();
                         String param = "dateTimeValueMin" + ci;
                         addParameter(param, value);
-                        whereClauses.add("cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as date)  >= cast(:" + param + " as date)");
+                        whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()),"cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as date)  >= cast(:" + param + " as date)"));
                     }
-                    if (c.getMaxValue() != null && !c.getMaxValue().isEmpty()) {
+                    if (!StringUtils.isEmpty(c.getMaxValue())) {
                         String value = c.getMaxValue();
                         String param = "dateTimeValueMax" + ci;
                         addParameter(param, value);
-                        whereClauses.add("cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as date)  <= cast(:" + param + " as date)");
+                        whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()),"cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as date)  <= cast(:" + param + " as date)"));
                     }
                 } else {
                     String value = c.getMinValue();
                     String param = "dateTimeValueMin" + ci;
                     addParameter(param, value);
-                    whereClauses.add("cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as date)  = cast(:" + param + " as date)");
+                    whereClauses.add(generateWhereClause(getFilterForSearchScope(c.getSearchScope()),"cast(" + tableAlias + ".observations ->>:" + conceptUuidParam + " as date)  = cast(:" + param + " as date)"));
                 }
             }
         }
@@ -341,22 +339,17 @@ public class BaseSubjectSearchQueryBuilder<T> {
         return (T) this;
     }
 
-    protected T withJoin(String joinClause) {
-        joinClauses.add(joinClause);
-        return (T) this;
-    }
-
-    protected T withRangeFilter(RangeFilter rangeFilter, String parameterPrefix, String minFilter, String maxFilter) {
+    protected T withRangeFilter(RangeFilter rangeFilter, String parameterPrefix, String minFilter, String maxFilter, String filter) {
         if (rangeFilter == null) return (T) this;
         if (rangeFilter.getMinValue() != null) {
             String parameter = parameterPrefix + "Min";
             addParameter(parameter, rangeFilter.getMinValue());
-            whereClauses.add(minFilter.replace("rangeParam", parameter));
+            whereClauses.add(generateWhereClause(filter, minFilter.replace("rangeParam", parameter)));
         }
         if (rangeFilter.getMaxValue() != null) {
             String parameter = parameterPrefix + "Max";
             addParameter(parameter, rangeFilter.getMaxValue());
-            whereClauses.add(maxFilter.replace("rangeParam", parameter));
+            whereClauses.add(generateWhereClause(filter, maxFilter.replace("rangeParam", parameter)));
         }
         return (T) this;
     }

@@ -1,23 +1,22 @@
 package org.avni.server.dao;
 
-import org.joda.time.DateTime;
 import org.avni.server.domain.StandardReportCardType;
+import org.avni.server.domain.StandardReportCardTypeType;
+import org.joda.time.DateTime;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.repository.PagingAndSortingRepository;
 import org.springframework.data.repository.query.Param;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
 import org.springframework.data.rest.core.annotation.RestResource;
 import org.springframework.format.annotation.DateTimeFormat;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
+import java.util.Set;
 
 @Repository
 @RepositoryRestResource(collectionResourceRel = "standardReportCardType", path = "standardReportCardType")
-@PreAuthorize("hasAnyAuthority('user','admin')")
-public interface StandardReportCardTypeRepository extends PagingAndSortingRepository<StandardReportCardType, Long> {
+public interface StandardReportCardTypeRepository extends AvniJpaRepository<StandardReportCardType, Long> {
     StandardReportCardType findByUuid(String uuid);
 
     List<StandardReportCardType> findAllByIsVoidedFalse();
@@ -29,4 +28,6 @@ public interface StandardReportCardTypeRepository extends PagingAndSortingReposi
             Pageable pageable);
 
     boolean existsByLastModifiedDateTimeGreaterThan(DateTime lastModifiedDateTime);
+
+    List<StandardReportCardType> findAllByTypeIn(Set<StandardReportCardTypeType> defaultDashboardStandardCardTypeTypes);
 }

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://www.ehcache.org/v3"
+        xsi:schemaLocation="http://www.ehcache.org/v3 http://www.ehcache.org/schema/ehcache-core-3.8.xsd">
+
+    <cache-template name="default">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+    </cache-template>
+
+    <cache alias="org.avni.server.domain.ConceptAnswer">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+        <heap unit="entries">10000</heap>
+    </cache>
+
+    <cache alias="org.avni.server.domain.Concept">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+        <heap unit="entries">10000</heap>
+    </cache>
+
+    <cache alias="org.avni.server.domain.User">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+        <heap unit="entries">1000</heap>
+    </cache>
+
+    <cache alias="org.avni.server.domain.AddressLevel">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+        <heap unit="entries">1000</heap>
+    </cache>
+
+    <cache alias="org.avni.server.domain.VirtualCatchment">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+        <heap unit="entries">1000</heap>
+    </cache>
+
+    <cache alias="org.avni.server.domain.Catchment">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+        <heap unit="entries">1000</heap>
+    </cache>
+
+    <cache alias="org.avni.server.domain.Concept.conceptAnswers">
+        <expiry>
+            <ttl unit="seconds">86400</ttl>
+        </expiry>
+        <heap unit="entries">1000</heap>
+    </cache>
+</config>

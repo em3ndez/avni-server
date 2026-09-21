@@ -7,6 +7,7 @@ import org.avni.messaging.domain.MessageReceiver;
 import org.avni.messaging.domain.MessageRequest;
 import org.avni.messaging.domain.NextTriggerDetails;
 import org.avni.messaging.domain.exception.GlificGroupMessageFailureException;
+import org.avni.messaging.domain.exception.GlificNotConfiguredException;
 import org.avni.messaging.repository.GlificContactRepository;
 import org.avni.messaging.repository.GlificMessageRepository;
 import org.avni.server.domain.Individual;
@@ -14,6 +15,8 @@ import org.avni.server.domain.User;
 import org.avni.server.service.IndividualService;
 import org.avni.server.service.UserService;
 import org.avni.server.util.A;
+import org.avni.server.util.PhoneNumberUtil;
+import org.avni.server.util.RegionUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -28,15 +31,14 @@ import java.util.stream.Stream;
 
 @Service
 public class GroupMessagingService {
-
     private static final Logger logger = LoggerFactory.getLogger(MessagingService.class);
     public static final String NON_STATIC_NAME_PARAMETER = "@name";
     public static final int CONTACT_MEMBER_PAGE_SIZE = 500;
-    private GlificMessageRepository glificMessageRepository;
-    private GlificContactRepository glificContactRepository;
-    private IndividualService individualService;
-    private UserService userService;
-    private Bugsnag bugsnag;
+    private final GlificMessageRepository glificMessageRepository;
+    private final GlificContactRepository glificContactRepository;
+    private final IndividualService individualService;
+    private final UserService userService;
+    private final Bugsnag bugsnag;
 
     @Autowired
     public GroupMessagingService(GlificMessageRepository glificMessageRepository,
@@ -49,7 +51,7 @@ public class GroupMessagingService {
         this.bugsnag = bugsnag;
     }
 
-    public void sendManualMessage(MessageRequest messageRequest) {
+    public void sendManualMessage(MessageRequest messageRequest) throws GlificNotConfiguredException {
         MessageReceiver messageReceiver = messageRequest.getMessageReceiver();
         ManualMessage manualMessage = messageRequest.getManualMessage();
         String[] parameters = manualMessage.getParameters();
@@ -89,7 +91,7 @@ public class GroupMessagingService {
         }
     }
 
-    private int sendMessageToContactsInThePartiallySentPage(MessageReceiver messageReceiver, ManualMessage manualMessage, String[] parameters, int[] indicesOfNonStaticParameters) {
+    private int sendMessageToContactsInThePartiallySentPage(MessageReceiver messageReceiver, ManualMessage manualMessage, String[] parameters, int[] indicesOfNonStaticParameters) throws GlificNotConfiguredException {
         int pageNoToResumeFrom = manualMessage.getNextTriggerDetails().getPageNo();
         String contactIdToResumeFrom = manualMessage.getNextTriggerDetails().getContactId();
         List<GlificContactGroupContactsResponse.GlificContactGroupContacts> contactGroupContacts;
@@ -143,6 +145,7 @@ public class GroupMessagingService {
     }
 
     private Optional<String> findNameOfTheContact(GlificContactGroupContactsResponse.GlificContactGroupContacts contactGroupContact) {
+        PhoneNumberUtil.getStandardFormatPhoneNumber(contactGroupContact.getPhone(), RegionUtil.getCurrentUserRegion());
         Optional<String> name = Stream.<Supplier<Optional<String>>>of(
                         () -> userService.findByPhoneNumber(contactGroupContact.getPhone()).map(User::getName),
                         () -> individualService.findByPhoneNumber(contactGroupContact.getPhone()).map(Individual::getFirstName))

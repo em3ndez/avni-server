@@ -4,9 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import org.avni.server.application.KeyValues;
-import org.avni.server.domain.Concept;
-import org.avni.server.domain.ConceptAnswer;
-import org.avni.server.domain.ConceptDataType;
+import org.avni.server.domain.*;
+import org.avni.server.util.BadRequestError;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -27,6 +27,12 @@ public class ConceptContract extends ReferenceDataContract {
     private boolean unique = false;
     private Double order;
     private KeyValues keyValues;
+    private List<ConceptMedia> media;
+
+    public static enum RequestType {
+        Inline, Full, Bundle
+    }
+    public static final int MAX_NAME_LENGTH = 255;
 
     public static ConceptContract create(Concept concept) {
         ConceptContract conceptContract = new ConceptContract();
@@ -40,6 +46,7 @@ public class ConceptContract extends ReferenceDataContract {
         conceptContract.setLowNormal(concept.getLowNormal());
         conceptContract.setHighAbsolute(concept.getHighAbsolute());
         conceptContract.setHighNormal(concept.getHighNormal());
+        conceptContract.setMedia(concept.getMedia());
         List<ConceptContract> answerConceptContracts = concept.getConceptAnswers().stream()
                 .map((ConceptAnswer answer) -> {
                     Concept answerConcept = answer.getAnswerConcept();
@@ -80,6 +87,11 @@ public class ConceptContract extends ReferenceDataContract {
     @JsonIgnore
     public boolean isCoded() {
         return ConceptDataType.Coded.toString().equals(this.getDataType());
+    }
+
+    @JsonIgnore
+    public boolean isQuestionGroup() {
+        return ConceptDataType.QuestionGroup.toString().equals(this.getDataType());
     }
 
     public List<ConceptContract> getAnswers() {
@@ -173,5 +185,32 @@ public class ConceptContract extends ReferenceDataContract {
 
     public void setActive(Boolean active) {
         this.active = active;
+    }
+
+
+    public List<ConceptMedia> getMedia() {
+        return media;
+    }
+
+    public void setMedia(List<ConceptMedia> media) {
+        this.media = media;
+    }
+
+    public boolean hasNameOrUUID() {
+        return StringUtils.hasText(this.getName()) || StringUtils.hasText(this.getUuid());
+    }
+
+    public boolean isNameLengthExceeded() {
+        String name = this.getName();
+        return name != null && name.trim().length() > MAX_NAME_LENGTH;
+    }
+
+    public void validate() {
+        if (!hasNameOrUUID()) {
+            throw new BadRequestError("Concept must have either uuid or name");
+        }
+        if (isNameLengthExceeded()) {
+            throw new BadRequestError(String.format("Concept name must not exceed %d characters", MAX_NAME_LENGTH));
+        }
     }
 }

@@ -3,17 +3,19 @@ package org.avni.server.web;
 import org.avni.server.application.FormMapping;
 import org.avni.server.dao.application.FormMappingRepository;
 import org.avni.server.domain.*;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.service.IndividualService;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.web.request.EncounterContract;
-import org.avni.server.web.request.ProgramEncountersContract;
+import org.avni.server.web.request.ProgramEncounterContract;
 import org.avni.server.web.request.RuleDependencyRequest;
 import org.avni.server.web.request.RuleRequest;
 import org.avni.server.web.request.rules.request.RequestEntityWrapper;
 import org.avni.server.web.request.rules.response.EligibilityRuleEntity;
 import org.avni.server.web.request.rules.response.EligibilityRuleResponseEntity;
 import org.avni.server.web.request.rules.response.RuleResponseEntity;
+import org.avni.server.web.util.ErrorBodyBuilder;
 import org.avni.server.web.validation.ValidationException;
-import org.codehaus.jettison.json.JSONException;
 import org.avni.server.dao.IndividualRepository;
 import org.avni.server.dao.ProgramEnrolmentRepository;
 import org.avni.server.framework.security.UserContextHolder;
@@ -24,9 +26,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
-import java.io.IOException;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -40,46 +42,58 @@ public class RuleController {
     private final IndividualRepository individualRepository;
     private final FormMappingRepository formMappingRepository;
     private final IndividualService individualService;
+    private final AccessControlService accessControlService;
+    private final ErrorBodyBuilder errorBodyBuilder;
 
     @Autowired
     public RuleController(RuleService ruleService,
                           ProgramEnrolmentRepository programEnrolmentRepository,
                           IndividualRepository individualRepository,
-                          FormMappingRepository formMappingRepository, IndividualService individualService) {
+                          FormMappingRepository formMappingRepository, IndividualService individualService, AccessControlService accessControlService, ErrorBodyBuilder errorBodyBuilder) {
         this.programEnrolmentRepository = programEnrolmentRepository;
         this.individualRepository = individualRepository;
         this.formMappingRepository = formMappingRepository;
         this.individualService = individualService;
+        this.accessControlService = accessControlService;
+        this.errorBodyBuilder = errorBodyBuilder;
         logger = LoggerFactory.getLogger(this.getClass());
         this.ruleService = ruleService;
     }
 
     @RequestMapping(value = "/ruleDependency", method = RequestMethod.POST)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     public ResponseEntity<?> saveDependency(@RequestBody RuleDependencyRequest ruleDependency) {
+        accessControlService.checkPrivilege(PrivilegeType.EditOrganisationConfiguration);
         logger.info(String.format("Creating rule dependency for: %s", UserContextHolder.getUserContext().getOrganisation().getName()));
         return new ResponseEntity<>(ruleService.createDependency(ruleDependency.getCode(), ruleDependency.getHash()).getUuid(),
                 HttpStatus.CREATED);
     }
 
+    @RequestMapping(value = "/web/ruleDependency/global", method = RequestMethod.POST)
+    public ResponseEntity<?> createGlobalRule(@RequestBody String ruleCode) {
+        accessControlService.checkPrivilege(PrivilegeType.EditOrganisationConfiguration);
+        ruleService.createUpdateGlobalRule(ruleCode);
+        return new ResponseEntity<>(HttpStatus.OK);
+    }
+
     @RequestMapping(value = "/rules", method = RequestMethod.POST)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     public ResponseEntity<?> saveRules(@RequestBody List<RuleRequest> ruleRequests) {
+        accessControlService.checkPrivilege(PrivilegeType.EditOrganisationConfiguration);
         logger.info(String.format("Creating rules for: %s", UserContextHolder.getUserContext().getOrganisation().getName()));
         try {
             ruleService.createOrUpdate(ruleRequests);
         } catch (ValidationException e) {
-            e.printStackTrace();
-            return ResponseEntity.badRequest().body(e.getMessage());
+            logger.info(String.format("Error creating rules for: %s", UserContextHolder.getUserContext().getOrganisation().getName()), e);
+            return ResponseEntity.badRequest().body(errorBodyBuilder.getErrorMessageBody(e));
         }
         return new ResponseEntity<>(HttpStatus.CREATED);
     }
 
     @RequestMapping(value = "/rule", method = RequestMethod.POST)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     public ResponseEntity<?> saveRule(@RequestBody RuleRequest ruleRequest) {
-        logger.info(String.format("Creating rules for: %s", UserContextHolder.getUserContext().getOrganisation().getName()));
-        ruleService.createOrUpdate(ruleRequest);
+        accessControlService.checkPrivilege(PrivilegeType.EditOrganisationConfiguration);
+        Organisation organisation = UserContextHolder.getUserContext().getOrganisation();
+        logger.info(String.format("Creating rules for: %s", organisation.getName()));
+        ruleService.createOrUpdate(ruleRequest, organisation);
         return new ResponseEntity<>(HttpStatus.CREATED);
     }
 
@@ -103,6 +117,7 @@ public class RuleController {
 
     @RequestMapping(value = "/web/programSummaryRule", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     ResponseEntity<?> programSummaryRule(@RequestParam String programEnrolmentUUID) {
         ProgramEnrolment programEnrolment = programEnrolmentRepository.findByUuid(programEnrolmentUUID);
         try {
@@ -121,6 +136,7 @@ public class RuleController {
 
     @RequestMapping(value = "/web/subjectSummaryRule", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     ResponseEntity<?> subjectSummaryRule(@RequestParam String subjectUUID) {
         try {
             Individual individual = individualRepository.findByUuid(subjectUUID);
@@ -139,6 +155,7 @@ public class RuleController {
 
     @RequestMapping(value = "/web/eligibleGeneralEncounters", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     ResponseEntity<?> getEligibleGeneralEncounters(@RequestParam String subjectUUID) {
         try {
             Individual individual = individualRepository.findByUuid(subjectUUID);
@@ -163,6 +180,7 @@ public class RuleController {
 
     @RequestMapping(value = "/web/eligibleProgramEncounters", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     ResponseEntity<?> getEligibleProgramEncounters(@RequestParam String enrolmentUUID) {
         try {
             ProgramEnrolment programEnrolment = programEnrolmentRepository.findByUuid(enrolmentUUID);
@@ -173,7 +191,7 @@ public class RuleController {
             Stream<ProgramEncounter> scheduledEncountersStream = programEnrolment
                     .getEncounters(true)
                     .filter(enc -> !enc.isVoided() && enc.getEncounterDateTime() == null && enc.getCancelDateTime() == null);
-            Set<ProgramEncountersContract> scheduledEncounters = individualService.constructProgramEncounters(scheduledEncountersStream);
+            Set<ProgramEncounterContract> scheduledEncounters = individualService.constructProgramEncounters(scheduledEncountersStream);
             JsonObject response = new JsonObject().with("scheduledEncounters", scheduledEncounters);
             logger.info(String.format("Executing encounter Eligibility rule for the enrolment uuid %s", enrolmentUUID));
             EligibilityRuleResponseEntity ruleResponse = ruleService.executeEligibilityRule(programEnrolment.getIndividual(), encounterTypes);

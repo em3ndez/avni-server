@@ -1,21 +1,17 @@
 package org.avni.server.dao;
 
-import org.avni.server.domain.Concept;
-import org.avni.server.domain.Encounter;
-import org.avni.server.domain.EncounterType;
-import org.avni.server.domain.Individual;
+import jakarta.persistence.criteria.*;
+import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
 import org.joda.time.DateTime;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Slice;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Repository;
 
-import javax.persistence.criteria.*;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.List;
@@ -23,8 +19,10 @@ import java.util.Map;
 
 @Repository
 @RepositoryRestResource(collectionResourceRel = "encounter", path = "encounter", exported = false)
-@PreAuthorize("hasAnyAuthority('user','admin')")
-public interface EncounterRepository extends TransactionalDataRepository<Encounter>, OperatingIndividualScopeAwareRepository<Encounter> {
+public interface EncounterRepository extends TransactionalDataRepository<Encounter>, OperatingIndividualScopeAwareRepository<Encounter>, SubjectTreeItemRepository {
+
+    List<Encounter> findAllByUuidIn(List<String> uuids);
+
     Page<Encounter> findByLastModifiedDateTimeIsBetweenOrderByLastModifiedDateTimeAscIdAsc(
             Date lastModifiedDateTime, Date now, Pageable pageable);
 
@@ -38,10 +36,11 @@ public interface EncounterRepository extends TransactionalDataRepository<Encount
     }
 
     @Override
-    default boolean isEntityChangedForCatchment(SyncParameters syncParameters){
+    default boolean isEntityChanged(SyncParameters syncParameters){
         return count(syncEntityChangedAuditSpecification(syncParameters)
                 .and(syncTypeIdSpecification(syncParameters.getTypeId()))
                 .and(syncStrategySpecification(syncParameters))
+                .and(syncDisabledSpecification())
         ) > 0;
     }
 
@@ -105,6 +104,15 @@ public interface EncounterRepository extends TransactionalDataRepository<Encount
         return (Root<Encounter> root, CriteriaQuery<?> query, CriteriaBuilder cb) -> cb.isNotNull(root.get("cancelDateTime"));
     }
 
+    default Specification<Encounter> orderByVisitDateDescIdDesc() {
+        return (Root<Encounter> root, CriteriaQuery<?> query, CriteriaBuilder cb) -> {
+            query.orderBy(
+                    cb.desc(cb.coalesce(cb.coalesce(root.get("earliestVisitDateTime"), root.get("encounterDateTime")), root.get("cancelDateTime"))),
+                    cb.desc(root.get("id")));
+            return cb.conjunction();
+        };
+    }
+
     default Specification<Encounter> withEncounterTypeIdUuids(List<String> encounterTypeUuids) {
         return (Root<Encounter> root, CriteriaQuery<?> query, CriteriaBuilder cb) ->
                 encounterTypeUuids.isEmpty() ? null : root.get("encounterType").get("uuid").in(encounterTypeUuids);
@@ -127,37 +135,55 @@ public interface EncounterRepository extends TransactionalDataRepository<Encount
 
     default Page<Encounter> findByConcepts(Date lastModifiedDateTime, Date now, Map<Concept, String> concepts, Pageable pageable) {
         return findAll(lastModifiedBetween(lastModifiedDateTime, now)
-                .and(withConceptValues(concepts, "observations")), pageable);
+                .and(withConceptValues(concepts, "observations"))
+                .and(inCurrentOrganisation()), pageable);
     }
 
     default Page<Encounter> findByConceptsAndEncounterType(Date lastModifiedDateTime, Date now, Map<Concept, String> concepts, String encounterType, Pageable pageable) {
         return findAll(lastModifiedBetween(lastModifiedDateTime, now)
                 .and(withConceptValues(concepts, "observations"))
-                .and(findByEncounterTypeSpec(encounterType)), pageable);
+                .and(findByEncounterTypeSpec(encounterType))
+                .and(inCurrentOrganisation()), pageable);
     }
 
     default Page<Encounter> findByConceptsAndEncounterTypeAndSubject(Date lastModifiedDateTime, Date now, Map<Concept, String> concepts, String encounterType, String subjectUUID, Pageable pageable) {
         return findAll(lastModifiedBetween(lastModifiedDateTime, now)
                 .and(withConceptValues(concepts, "observations"))
                 .and(findByEncounterTypeSpec(encounterType))
-                .and(findBySubjectUUIDSpec(subjectUUID)), pageable);
+                .and(findBySubjectUUIDSpec(subjectUUID))
+                .and(inCurrentOrganisation()), pageable);
     }
 
     @Modifying(clearAutomatically = true)
     @Query(value = "update encounter e set " +
             "address_id = :addressId, " +
             "sync_concept_1_value = :syncAttribute1Value, " +
-            "sync_concept_2_value = :syncAttribute2Value " +
+            "sync_concept_2_value = :syncAttribute2Value, " +
+            "last_modified_date_time = (current_timestamp + id * (interval '1 millisecond')/1000), last_modified_by_id = :lastModifiedById " +
             "where e.individual_id = :individualId", nativeQuery = true)
-    void updateSyncAttributesForIndividual(Long individualId, Long addressId, String syncAttribute1Value, String syncAttribute2Value);
+    void updateSyncAttributesForIndividual(Long individualId, Long addressId, String syncAttribute1Value, String syncAttribute2Value, Long lastModifiedById);
+    default void updateSyncAttributesForIndividual(Long individualId, Long addressId, String syncAttribute1Value, String syncAttribute2Value) {
+        this.updateSyncAttributesForIndividual(individualId, addressId, syncAttribute1Value, syncAttribute2Value, UserContextHolder.getUserId());
+    }
 
     @Modifying(clearAutomatically = true)
     @Query(value = "update encounter e set " +
             "sync_concept_1_value = CAST((i.observations ->> CAST(:syncAttribute1 as text)) as text), " +
-            "sync_concept_2_value = CAST((i.observations ->> CAST(:syncAttribute2 as text)) as text) " +
+            "sync_concept_2_value = CAST((i.observations ->> CAST(:syncAttribute2 as text)) as text), " +
+            "last_modified_date_time = (current_timestamp + e.id * (interval '1 millisecond')/1000), last_modified_by_id = :lastModifiedById " +
             "from individual i " +
             "where e.individual_id = i.id and i.subject_type_id = :subjectTypeId", nativeQuery = true)
-    void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2);
+    void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2, Long lastModifiedById);
+    default void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2) {
+        this.updateConceptSyncAttributesForSubjectType(subjectTypeId, syncAttribute1, syncAttribute2, UserContextHolder.getUserId());
+    }
 
+    @Modifying
+    @Query(value = "update encounter e set is_voided = true, last_modified_date_time = (current_timestamp + random() * 5000 * (interval '1 millisecond')), last_modified_by_id = :lastModifiedById " +
+            "from individual i" +
+            " where i.address_id = :addressId and i.id = e.individual_id and e.is_voided = false", nativeQuery = true)
+    void voidSubjectItemsAt(Long addressId, Long lastModifiedById);
+    default void voidSubjectItemsAt(AddressLevel address) {
+        this.voidSubjectItemsAt(address.getId(), UserContextHolder.getUserId());
+    }
 }
-

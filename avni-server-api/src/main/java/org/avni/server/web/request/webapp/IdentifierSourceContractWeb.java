@@ -2,7 +2,7 @@ package org.avni.server.web.request.webapp;
 
 import org.avni.server.domain.IdentifierSource;
 import org.avni.server.domain.JsonObject;
-import org.springframework.hateoas.core.Relation;
+import org.springframework.hateoas.server.core.Relation;
 
 @Relation(collectionRelation = "identifierSource")
 public class IdentifierSourceContractWeb {
@@ -105,7 +105,7 @@ public class IdentifierSourceContractWeb {
         contract.setMinLength(identifierSource.getMinLength());
         contract.setMinimumBalance(identifierSource.getMinimumBalance());
         contract.setName(identifierSource.getName());
-        contract.setType(identifierSource.getType());
+        contract.setType(identifierSource.getType().name());
         contract.setOptions(identifierSource.getOptions());
         contract.setId(identifierSource.getId());
         contract.setVoided(identifierSource.isVoided());
@@ -136,5 +136,12 @@ public class IdentifierSourceContractWeb {
 
     public void setId(Long id) {
         this.id = id;
+    }
+
+    @Override
+    public String toString() {
+        return "{" +
+                "UUID='" + UUID + '\'' +
+                '}';
     }
 }

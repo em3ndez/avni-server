@@ -1,14 +1,17 @@
 package org.avni.server.service;
 
+import jakarta.validation.constraints.NotNull;
 import org.avni.server.application.Form;
 import org.avni.server.application.FormElement;
+import org.avni.server.application.FormMapping;
+import org.avni.server.common.ValidationResult;
 import org.avni.server.common.dbSchema.ColumnNames;
 import org.avni.server.common.dbSchema.TableNames;
 import org.avni.server.dao.ConceptRepository;
 import org.avni.server.dao.IndividualRepository;
 import org.avni.server.dao.LocationRepository;
-import org.avni.server.dao.application.FormRepository;
 import org.avni.server.domain.*;
+import org.avni.server.mapper.ConceptMapper;
 import org.avni.server.util.BadRequestError;
 import org.avni.server.util.DateTimeUtil;
 import org.avni.server.web.external.request.export.ExportFilters;
@@ -17,11 +20,11 @@ import org.avni.server.web.request.rules.RulesContractWrapper.Decision;
 import org.avni.server.web.request.rules.constant.WorkFlowTypeEnum;
 import org.avni.server.web.request.rules.response.KeyValueResponse;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import javax.validation.constraints.NotNull;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.AbstractMap.SimpleEntry;
@@ -34,15 +37,18 @@ public class ObservationService {
     private final IndividualRepository individualRepository;
     private final LocationRepository locationRepository;
     private final NamedParameterJdbcTemplate jdbcTemplate;
-    private final FormRepository formRepository;
+    private final EnhancedValidationService enhancedValidationService;
+
+    @Value("${avni.enhancedValidation.enabled}")
+    private boolean enhancedValidationEnabled;
 
     @Autowired
-    public ObservationService(ConceptRepository conceptRepository, IndividualRepository individualRepository, LocationRepository locationRepository, NamedParameterJdbcTemplate jdbcTemplate, FormRepository formRepository) {
+    public ObservationService(ConceptRepository conceptRepository, IndividualRepository individualRepository, LocationRepository locationRepository, NamedParameterJdbcTemplate jdbcTemplate, EnhancedValidationService enhancedValidationService) {
         this.conceptRepository = conceptRepository;
         this.individualRepository = individualRepository;
         this.locationRepository = locationRepository;
         this.jdbcTemplate = jdbcTemplate;
-        this.formRepository = formRepository;
+        this.enhancedValidationService = enhancedValidationService;
     }
 
     public ObservationCollection createObservations(List<ObservationRequest> observationRequests) {
@@ -52,22 +58,40 @@ public class ObservationService {
                     Concept concept;
                     if (observationRequest.getConceptUUID() == null && observationRequest.getConceptName() != null) {
                         concept = conceptRepository.findByName(observationRequest.getConceptName());
-                        if (concept == null) {
-                            throw new NullPointerException(String.format("Concept with name=%s not found", observationRequest.getConceptName()));
+                        if (concept != null) {
+                            String conceptUUID = concept.getUuid();
+                            observationRequest.setConceptUUID(conceptUUID);
                         }
-                        String conceptUUID = concept.getUuid();
-                        observationRequest.setConceptUUID(conceptUUID);
                     } else {
                         concept = conceptRepository.findByUuid(observationRequest.getConceptUUID());
+                    }
+                    if (concept == null) {
+                        throw new NullPointerException(String.format("Concept with uuid=%s/name=%s not found", observationRequest.getConceptUUID(), observationRequest.getConceptName()));
                     }
                     return new SimpleEntry<>(concept, observationRequest.getValue());
                 })
                 .filter(obsReqAsMap -> null != obsReqAsMap.getKey()
                         && !"null".equalsIgnoreCase(String.valueOf(obsReqAsMap.getValue())))
-                .peek(this::validate)
                 .collect(Collectors
                         .toConcurrentMap((it -> it.getKey().getUuid()), SimpleEntry::getValue, (oldVal, newVal) -> newVal));
         return new ObservationCollection(completedObservationRequests);
+    }
+
+    /**
+     * Whether observation validation is switched on for this deployment (AVNI_ENHANCED_VALIDATION,
+     * default true in production and false in the test profile). Exposed so a caller that has to do
+     * structural work before it can validate - resolving the decision form on the approval path, say -
+     * can skip that work under the same switch, rather than enforcing a check the deployment has
+     * deliberately turned off.
+     */
+    public boolean isEnhancedValidationEnabled() {
+        return enhancedValidationEnabled;
+    }
+
+    public void validateObservationsAndDecisions(List<ObservationRequest> observationRequests, List<Decision> decisions, FormMapping formMapping) throws ValidationException {
+        if (enhancedValidationEnabled) {
+            enhancedValidationService.validateObservationsAndDecisionsAgainstFormMapping(observationRequests, decisions, formMapping);
+        }
     }
 
     public ObservationCollection createObservationsFromDecisions(List<Decision> decisions) {
@@ -75,39 +99,34 @@ public class ObservationService {
         for (Decision decision : decisions) {
             String conceptName = decision.getName();
             Concept concept = conceptRepository.findByName(conceptName);
-            if (concept == null) {
-                throw new NullPointerException(String.format("Concept with name=%s not found", conceptName));
-            }
-            String conceptUUID = concept.getUuid();
-            String dataType = concept.getDataType();
-            Object value;
-            Object decisionValue = decision.getValue();
-            switch (ConceptDataType.valueOf(dataType)) {
-                case Coded: {
-                    //TODO: validate that value is part of the concept answers set.
-                    if (decisionValue instanceof Collection<?>) {
-                        List<String> array = (List) decisionValue;
-                        value = array.stream().map(answerConceptName -> {
+            if (concept != null) {
+                String conceptUUID = concept.getUuid();
+                String dataType = concept.getDataType();
+                Object value = null;
+                Object decisionValue = decision.getValue();
+                switch (ConceptDataType.valueOf(dataType)) {
+                    case Coded: {
+                        //TODO: validate that value is part of the concept answers set.
+                        if (decisionValue instanceof Collection<?>) {
+                            List<String> array = (List) decisionValue;
+                            value = array.stream().map(answerConceptName -> {
+                                Concept answerConcept = conceptRepository.findByName(answerConceptName);
+                                return answerConcept != null ? answerConcept.getUuid() : null;
+                            }).filter(Objects::nonNull).toArray();
+                        } else {
+                            String answerConceptName = (String) decisionValue;
                             Concept answerConcept = conceptRepository.findByName(answerConceptName);
-                            if (answerConcept == null)
-                                throw new NullPointerException(String.format("Answer concept with name=%s not found", answerConceptName));
-                            return answerConcept.getUuid();
-                        }).toArray();
-                    } else {
-                        String answerConceptName = (String) decisionValue;
-                        Concept answerConcept = conceptRepository.findByName(answerConceptName);
-                        if (answerConcept == null)
-                            throw new NullPointerException(String.format("Answer concept with name=%s not found", answerConceptName));
-                        value = answerConcept.getUuid();
+                            if (answerConcept != null) value = answerConcept.getUuid();
+                        }
+                        break;
                     }
-                    break;
+                    default: {
+                        value = decisionValue;
+                        break;
+                    }
                 }
-                default: {
-                    value = decisionValue;
-                    break;
-                }
+                observations.put(conceptUUID, value);
             }
-            observations.put(conceptUUID, value);
         }
         return new ObservationCollection(observations);
     }
@@ -149,7 +168,8 @@ public class ObservationService {
                     break;
                 }
             }
-            observationContract.setConcept(concept.toConceptContract());
+            ConceptMapper conceptMapper = new ConceptMapper();
+            observationContract.setConcept(conceptMapper.toConceptContract(concept));
             observationContract.setValue(value);
             observationContracts.add(observationContract);
         }
@@ -207,24 +227,6 @@ public class ObservationService {
         return getObservationValue(encounterWithObs, concept);
     }
 
-    private void validate(SimpleEntry<Concept, Object> obsReqAsMap) {
-        Concept question = obsReqAsMap.getKey();
-        Object value = obsReqAsMap.getValue();
-        if (ConceptDataType.valueOf(question.getDataType()).equals(ConceptDataType.Coded)) {
-            if (value instanceof Collection<?>) {
-                ((Collection<String>) value).forEach(vl -> validateAnswer(question, vl));
-            } else {
-                validateAnswer(question, (String) value);
-            }
-        }
-    }
-
-    private void validateAnswer(Concept question, String uuid) {
-        if (question.getConceptAnswers().stream().noneMatch(ans -> ans.getAnswerConcept().getUuid().equals(uuid))) {
-            throw new IllegalArgumentException(String.format("Concept answer '%s' not found in Concept '%s'", uuid, question.getUuid()));
-        }
-    }
-
     public List<ObservationModelContract> constructObservationModelContracts(ObservationCollection observationCollection) {
         if (observationCollection == null) return Collections.emptyList();
         List<ObservationContract> observationContracts = this.constructObservations(observationCollection);
@@ -236,10 +238,37 @@ public class ObservationService {
     public ObservationModelContract constructObservation(ObservationContract observationContract) {
         Concept concept = conceptRepository.findByUuid(observationContract.getConcept().getUuid());
         ObservationModelContract observationModelContract = new ObservationModelContract();
-        observationModelContract.setValue(observationContract.getValue());
+        Object value = observationContract.getValue();
+        if (concept.getDataType().equals(ConceptDataType.QuestionGroup.toString())) {
+            ArrayList<?> valueAsArrayList = (ArrayList<?>) value;
+            if (valueAsArrayList != null && !valueAsArrayList.isEmpty()) {
+                if (valueAsArrayList.get(0) instanceof ArrayList)
+                    value = constructRepeatableQuestionGroupValue((List<List<ObservationContract>>) value);
+                else
+                    value = constructQuestionGroupValue((List<ObservationContract>) value);
+            }
+        }
+
+        observationModelContract.setValue(value);
         ConceptModelContract conceptModelContract = ConceptModelContract.fromConcept(concept);
         observationModelContract.setConcept(conceptModelContract);
         return observationModelContract;
+    }
+
+    private List<List<ObservationModelContract>> constructRepeatableQuestionGroupValue(List<List<ObservationContract>> repeatableQuestionGroupObservationContract) {
+        List<List<ObservationModelContract>> observationModelContracts = new ArrayList<>();
+        for (List<ObservationContract> questionGroupObservationContract : repeatableQuestionGroupObservationContract) {
+            observationModelContracts.add(constructQuestionGroupValue(questionGroupObservationContract));
+        }
+
+        return observationModelContracts;
+    }
+
+    private List<ObservationModelContract> constructQuestionGroupValue(List<ObservationContract> questionGroupEntries) {
+        return questionGroupEntries
+                .stream()
+                .map(this::constructObservation)
+                .collect(Collectors.toList());
     }
 
     public List<ObservationContract> constructObservations(@NotNull ObservationCollection observationCollection) {
@@ -277,7 +306,7 @@ public class ObservationService {
             conceptContract.setAnswers(conceptAnswers.stream().map(ConceptContract::create).collect(Collectors.toList()));
         }
         observationContract.setConcept(conceptContract);
-        if (ConceptDataType.isGroupQuestion(conceptDataType)) {
+        if (ConceptDataType.isQuestionGroup(conceptDataType)) {
             if (entry.getValue() instanceof Collection) {
                 List<Object> repeatableQuestionGroup = (List<Object>) ((Collection) entry.getValue()).stream().map(value -> {
                     HashMap<String, Object> values = (HashMap<String, Object>) value;
@@ -327,8 +356,8 @@ public class ObservationService {
         return observations.filterByConcepts(mediaConcepts);
     }
 
-    private static final String maxNumberOfRepeatableItemsQuery = "select max(json_array_length((%s->>'%s')::json)) from %s where %s->>'%s' is not null";
-    private static final String maxNumberOfRepeatableItemsWithDateFilterQuery = "select max(json_array_length((%s->>'%s')::json)) from %s where %s->>'%s' is not null and (encounter_date_time between :fromDate and :toDate)";
+    private static final String maxNumberOfRepeatableItemsQuery = "select max(json_array_length((%s->>'%s')::json)) from %s where %s->>'%s' is not null and jsonb_typeof(%s->'%s') = 'array'";
+    private static final String maxNumberOfRepeatableItemsWithDateFilterQuery = "select max(json_array_length((%s->>'%s')::json)) from %s where %s->>'%s' is not null and jsonb_typeof(%s->'%s') = 'array' and (%s between :fromDate and :toDate)";
 
     static class CountMapper implements RowMapper<Integer> {
         @Override
@@ -350,8 +379,14 @@ public class ObservationService {
 
             repeatableQuestionGroupElements.forEach(formElement -> {
                 boolean dateFilterApplicable = fromDate != null;
-                String chosenQuery = dateFilterApplicable ? maxNumberOfRepeatableItemsWithDateFilterQuery : maxNumberOfRepeatableItemsQuery;
-                String query = String.format(chosenQuery, obsColumn, formElement.getConcept().getUuid(), tableName, obsColumn, formElement.getConcept().getUuid());
+                String query;
+                String conceptUuid = formElement.getConcept().getUuid();
+                if (dateFilterApplicable) {
+                    query = String.format(maxNumberOfRepeatableItemsWithDateFilterQuery, obsColumn, conceptUuid, tableName, obsColumn, conceptUuid, obsColumn, conceptUuid, ColumnNames.getOccurrenceDateTimeColumn(form.getFormType()));
+                } else {
+                    query = String.format(maxNumberOfRepeatableItemsQuery, obsColumn, conceptUuid, tableName, obsColumn, conceptUuid, obsColumn, conceptUuid);
+                }
+
                 if (formElement.isRepeatable()) {
                     HashMap<String, Object> paramMap = new HashMap<>();
                     if (dateFilterApplicable) {

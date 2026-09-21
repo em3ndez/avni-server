@@ -1,10 +1,11 @@
 package org.avni.server.web;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.IndividualRepository;
 import org.avni.server.dao.ProgramRepository;
 import org.avni.server.dao.SubjectTypeRepository;
-import org.avni.server.dao.SyncParameters;
 import org.avni.server.dao.program.SubjectProgramEligibilityRepository;
+import org.avni.server.domain.sync.SyncEntityName;
 import org.avni.server.domain.Individual;
 import org.avni.server.domain.ObservationCollection;
 import org.avni.server.domain.Program;
@@ -24,14 +25,15 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.SliceImpl;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.Link;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
 import java.util.Collections;
+
+import static org.avni.server.web.resourceProcessors.ResourceProcessor.addAuditFields;
 
 
 @RestController
@@ -64,7 +66,8 @@ public class SubjectProgramEligibilityController extends AbstractController<Subj
 
     @RequestMapping(value = "/subjectProgramEligibility/v2", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    public SlicedResources<Resource<SubjectProgramEligibility>> getSubjectProgramEligibilityByOperatingIndividualScopeAsSlice(
+    @Transactional(readOnly = true)
+    public SlicedResources<EntityModel<SubjectProgramEligibility>> getSubjectProgramEligibilityByOperatingIndividualScopeAsSlice(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
             @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
             @RequestParam(value = "subjectTypeUuid", required = false) String subjectTypeUuid,
@@ -73,12 +76,13 @@ public class SubjectProgramEligibilityController extends AbstractController<Subj
             return wrap(new SliceImpl<>(Collections.emptyList()));
         SubjectType subjectType = subjectTypeRepository.findByUuid(subjectTypeUuid);
         if (subjectType == null) return wrap(new SliceImpl<>(Collections.emptyList()));
-        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocationAsSlice(subjectProgramEligibilityRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncParameters.SyncEntityName.SubjectProgramEligibility));
+        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocationAsSlice(subjectProgramEligibilityRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncEntityName.SubjectProgramEligibility));
     }
 
     @RequestMapping(value = "/subjectProgramEligibility", method = RequestMethod.GET)
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    public PagedResources<Resource<SubjectProgramEligibility>> getSubjectProgramEligibilityByOperatingIndividualScope(
+    @Transactional(readOnly = true)
+    public CollectionModel<EntityModel<SubjectProgramEligibility>> getSubjectProgramEligibilityByOperatingIndividualScope(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
             @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
             @RequestParam(value = "subjectTypeUuid", required = false) String subjectTypeUuid,
@@ -87,7 +91,7 @@ public class SubjectProgramEligibilityController extends AbstractController<Subj
             return wrap(new PageImpl<>(Collections.emptyList()));
         SubjectType subjectType = subjectTypeRepository.findByUuid(subjectTypeUuid);
         if (subjectType == null) return wrap(new PageImpl<>(Collections.emptyList()));
-        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocation(subjectProgramEligibilityRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncParameters.SyncEntityName.SubjectProgramEligibility));
+        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocation(subjectProgramEligibilityRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncEntityName.SubjectProgramEligibility));
     }
 
     @RequestMapping(value = "/subjectProgramEligibility", method = RequestMethod.POST)
@@ -110,11 +114,12 @@ public class SubjectProgramEligibilityController extends AbstractController<Subj
     }
 
     @Override
-    public Resource<SubjectProgramEligibility> process(Resource<SubjectProgramEligibility> resource) {
+    public EntityModel<SubjectProgramEligibility> process(EntityModel<SubjectProgramEligibility> resource) {
         SubjectProgramEligibility subjectProgramEligibility = resource.getContent();
         resource.removeLinks();
-        resource.add(new Link(subjectProgramEligibility.getSubject().getUuid(), "subjectUUID"));
-        resource.add(new Link(subjectProgramEligibility.getProgram().getUuid(), "programUUID"));
+        resource.add(Link.of(subjectProgramEligibility.getSubject().getUuid(), "subjectUUID"));
+        resource.add(Link.of(subjectProgramEligibility.getProgram().getUuid(), "programUUID"));
+        addAuditFields(subjectProgramEligibility, resource);
         return resource;
     }
 

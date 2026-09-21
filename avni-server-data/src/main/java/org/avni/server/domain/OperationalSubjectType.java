@@ -1,0 +1,145 @@
+package org.avni.server.domain;
+
+import jakarta.persistence.*;
+import jakarta.validation.constraints.NotNull;
+import org.avni.server.application.Format;
+import org.avni.server.application.Subject;
+import org.hibernate.annotations.BatchSize;
+import org.joda.time.DateTime;
+
+@Entity
+@Table(name = "operational_subject_type")
+@BatchSize(size = 100)
+public class OperationalSubjectType extends OrganisationAwareEntity {
+    @NotNull
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "subject_type_id")
+    private SubjectType subjectType;
+
+    @Column
+    private String name;
+
+    public static OperationalSubjectType fromSubjectType(SubjectType subjectType, String uuid) {
+        OperationalSubjectType operationalSubjectType = new OperationalSubjectType();
+        operationalSubjectType.setSubjectType(subjectType);
+        operationalSubjectType.setName(subjectType.getName());
+        operationalSubjectType.setUuid(uuid);
+        return operationalSubjectType;
+    }
+
+    public SubjectType getSubjectType() {
+        return subjectType;
+    }
+
+    public void setSubjectType(SubjectType subjectType) {
+        this.subjectType = subjectType;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getSubjectTypeUUID() {
+        return subjectType.getUuid();
+    }
+
+    public Boolean getSubjectTypeVoided() {
+        return subjectType.isVoided();
+    }
+
+    public String getSubjectTypeName() {
+        return subjectType.getName();
+    }
+
+    public boolean getActive() {
+        return subjectType.getActive();
+    }
+
+    public boolean isGroup() {
+        return subjectType.isGroup();
+    }
+
+    public boolean isHousehold() {
+        return subjectType.isHousehold();
+    }
+
+    public Subject getType() {
+        return subjectType.getType();
+    }
+
+    public String getSubjectSummaryRule() {
+        return subjectType.getSubjectSummaryRule();
+    }
+
+    public String getProgramEligibilityCheckRule() {
+        return subjectType.getProgramEligibilityCheckRule();
+    }
+
+    public String getMemberAdditionEligibilityCheckRule() {
+        return subjectType.getMemberAdditionEligibilityCheckRule();
+    }
+    public boolean isUniqueName() {
+        return subjectType.isUniqueName();
+    }
+
+    public Format getValidFirstNameFormat() {
+        return subjectType.getValidFirstNameFormat();
+    }
+
+    public Format getValidLastNameFormat() {
+        return subjectType.getValidLastNameFormat();
+    }
+
+    public String getIconFileS3Key() {
+        return subjectType.getIconFileS3Key();
+    }
+
+    public boolean isAllowProfilePicture() {
+        return subjectType.isAllowProfilePicture();
+    }
+
+    public boolean isAllowMiddleName() {
+        return subjectType.isAllowMiddleName();
+    }
+
+    public boolean isLastNameOptional() {
+        return subjectType.isLastNameOptional();
+    }
+
+    public Format getValidMiddleNameFormat() {
+        return subjectType.getValidMiddleNameFormat();
+    }
+
+    @Override
+    public DateTime getLastModifiedDateTime() {
+        Auditable lastModified = getLastModified(getSubjectType());
+        return lastModified.equals(this) ? super.getLastModifiedDateTime() : lastModified.getLastModifiedDateTime();
+    }
+
+    @Override
+    public User getLastModifiedBy() {
+        Auditable lastModified = getLastModified(getSubjectType());
+        return lastModified.equals(this) ? super.getLastModifiedBy() : lastModified.getLastModifiedBy();
+    }
+
+    public boolean isDirectlyAssignable() {
+        return subjectType.isDirectlyAssignable();
+    }
+
+    @Override
+    public boolean isVoided() {
+        return subjectType.isVoided() || super.isVoided();
+    }
+
+    public JsonObject getSettings() {
+        return subjectType.getSettings();
+    }
+
+    public boolean isAttendanceEnabled() {
+        return subjectType.isAttendanceEnabled();
+    }
+}

@@ -1,20 +1,22 @@
 package org.avni.server.dao.program;
 
+import jakarta.persistence.criteria.*;
 import org.avni.server.dao.OperatingIndividualScopeAwareRepository;
+import org.avni.server.dao.SubjectTreeItemRepository;
 import org.avni.server.dao.SyncParameters;
 import org.avni.server.dao.TransactionalDataRepository;
+import org.avni.server.domain.AddressLevel;
 import org.avni.server.domain.Individual;
 import org.avni.server.domain.SubjectType;
 import org.avni.server.domain.User;
 import org.avni.server.domain.program.SubjectProgramEligibility;
 import org.avni.server.framework.security.UserContextHolder;
-import org.springframework.data.domain.Slice;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Repository;
 
-import javax.persistence.criteria.*;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -22,8 +24,7 @@ import static org.avni.server.dao.sync.TransactionDataCriteriaBuilderUtil.joinUs
 
 @Repository
 @RepositoryRestResource(collectionResourceRel = "subjectProgramEligibility", path = "subjectProgramEligibility", exported = false)
-@PreAuthorize("hasAnyAuthority('user','admin')")
-public interface SubjectProgramEligibilityRepository extends TransactionalDataRepository<SubjectProgramEligibility>, OperatingIndividualScopeAwareRepository<SubjectProgramEligibility> {
+public interface SubjectProgramEligibilityRepository extends TransactionalDataRepository<SubjectProgramEligibility>, OperatingIndividualScopeAwareRepository<SubjectProgramEligibility>, SubjectTreeItemRepository {
 
     default Specification<SubjectProgramEligibility> syncStrategySpecification(SyncParameters syncParameters) {
         return (Root<SubjectProgramEligibility> root, CriteriaQuery<?> query, CriteriaBuilder cb) -> {
@@ -55,10 +56,20 @@ public interface SubjectProgramEligibilityRepository extends TransactionalDataRe
     }
 
     @Override
-    default boolean isEntityChangedForCatchment(SyncParameters syncParameters) {
+    default boolean isEntityChanged(SyncParameters syncParameters) {
         return count(syncEntityChangedAuditSpecification(syncParameters)
                 .and(syncStrategySpecification(syncParameters))
+                .and(syncDisabledSpecification())
         ) > 0;
+    }
+
+    @Modifying
+    @Query(value = "update subject_program_eligibility e set is_voided = true, last_modified_date_time = (current_timestamp + random() * 5000 * (interval '1 millisecond')), last_modified_by_id = :lastModifiedById " +
+            "from individual i" +
+            " where i.address_id = :addressId and i.id = e.subject_id and e.is_voided = false", nativeQuery = true)
+    void voidSubjectItemsAt(Long addressId, Long lastModifiedById);
+    default void voidSubjectItemsAt(AddressLevel address) {
+        this.voidSubjectItemsAt(address.getId(), UserContextHolder.getUserId());
     }
 }
 

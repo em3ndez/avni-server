@@ -3,6 +3,7 @@ package org.avni.server.service;
 import com.auth0.jwk.SigningKeyNotFoundException;
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.JWTCreator;
+import com.auth0.jwt.exceptions.TokenExpiredException;
 import org.avni.server.config.IdpType;
 import org.avni.server.dao.AccountAdminRepository;
 import org.avni.server.dao.OrganisationRepository;
@@ -11,6 +12,7 @@ import org.avni.server.domain.AccountAdmin;
 import org.avni.server.domain.Organisation;
 import org.avni.server.domain.User;
 import org.avni.server.domain.UserContext;
+import org.avni.server.domain.accessControl.AvniNoUserSessionException;
 import org.avni.server.framework.security.AuthService;
 import org.junit.Before;
 import org.junit.Test;
@@ -25,6 +27,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.core.Is.is;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 import static org.mockito.MockitoAnnotations.initMocks;
 
@@ -39,6 +42,8 @@ public class AuthServiceTest {
     private CognitoAuthServiceImpl cognitoAuthService;
     @Mock
     private AccountAdminRepository accountAdminRepository;
+    @Mock
+    private UserService userService;
     private User user;
     private AuthService authService;
     private AccountAdmin accountAdmin;
@@ -46,9 +51,8 @@ public class AuthServiceTest {
     @Before
     public void setup() {
         initMocks(this);
-//        cognitoAuthService = new CognitoUserContextServiceImpl(organisationRepository, userRepository, "poolId", "clientId");
         authService = new AuthService(userRepository, organisationRepository, accountAdminRepository,
-                new IdpServiceFactory(organisationRepository, null, null, cognitoAuthService, keycloakAuthService, IdpType.cognito, null));
+                new IdpServiceFactory(organisationRepository, null, null, cognitoAuthService, keycloakAuthService, IdpType.cognito, null), userService);
         String uuid = "9ecc2805-6528-47ee-8267-9368b266ad39";
         user = new User();
         user.setUuid(uuid);
@@ -57,13 +61,16 @@ public class AuthServiceTest {
         accountAdmin.setUser(user);
     }
 
-    @Test
-    public void shouldReturnEmptyUserContextIfUserCannotBeFoundInToken() throws SigningKeyNotFoundException {
+    @Test (expected = AvniNoUserSessionException.class)
+    public void shouldThrowExceptionIfUserNotFound() throws SigningKeyNotFoundException {
         when(cognitoAuthService.getUserFromToken("some token")).thenReturn(null);
-        UserContext userContext = authService.authenticateByToken("some token", null);
-        assertThat(userContext.getUser(), is(equalTo(null)));
-        assertThat(userContext.getOrganisation(), is(equalTo(null)));
-        assertThat(userContext.getRoles().size(), is(equalTo(0)));
+        authService.authenticateByToken("some token", null);
+    }
+
+    @Test (expected = AvniNoUserSessionException.class)
+    public void shouldThrowExceptionIfTokenExpired() throws SigningKeyNotFoundException {
+        when(cognitoAuthService.getUserFromToken("some token")).thenThrow(new TokenExpiredException("token expired"));
+        authService.authenticateByToken("some token", null);
     }
 
     @Test
@@ -72,14 +79,8 @@ public class AuthServiceTest {
         when(organisationRepository.findOne(1L)).thenReturn(organisation);
         when(userRepository.findByUuid(user.getUuid())).thenReturn(user);
         when(cognitoAuthService.getUserFromToken("some token")).thenReturn(user);
-//        Algorithm algorithm = Algorithm.HMAC256("not very useful secret");
-//        String token = createForBaseToken(user.getUuid()).sign(algorithm);
         UserContext userContext = authService.authenticateByToken("some token", null);
         assertThat(userContext.getOrganisation(), is(equalTo(organisation)));
-    }
-
-    private JWTCreator.Builder createForBaseToken(String userUuid) {
-        return JWT.create().withClaim("custom:userUUID", userUuid);
     }
 
     @Test
@@ -96,36 +97,29 @@ public class AuthServiceTest {
         assertThat(userContext.getRoles().size(), is(equalTo(1)));
 
         user.setAccountAdmin(null);
-        user.setOrgAdmin(true);
 
         userContext = authService.authenticateByToken("some token", null);
-        assertThat(userContext.getRoles().size(), is(equalTo(2)));
-        assertThat(userContext.getRoles(), containsInAnyOrder(User.ORGANISATION_ADMIN, User.USER));
+        assertThat(userContext.getRoles(), containsInAnyOrder(User.USER));
 
         user.setAccountAdmin(accountAdmin);
-        when(accountAdminRepository.findByUser_Id(user.getId())).thenReturn(adminUser);
-        user.setOrgAdmin(false);
+        when(userService.isAdmin(any())).thenReturn(true);
         userContext = authService.authenticateByToken("some token", null);
-        assertThat(userContext.getRoles().size(), is(equalTo(1)));
-        assertThat(userContext.getRoles(), contains(User.ADMIN));
+        assertThat(userContext.getRoles().size(), is(equalTo(0)));
 
         user.setAccountAdmin(null);
-        when(accountAdminRepository.findByUser_Id(user.getId())).thenReturn(new ArrayList<>());
-        user.setOrgAdmin(false);
+        when(userService.isAdmin(any())).thenReturn(false);
         userContext = authService.authenticateByToken("some token", null);
         assertThat(userContext.getRoles().size(), is(equalTo(1)));
         assertThat(userContext.getRoles(), contains(User.USER));
 
         user.setAccountAdmin(accountAdmin);
-        when(accountAdminRepository.findByUser_Id(user.getId())).thenReturn(adminUser);
-        user.setOrgAdmin(true);
+        when(userService.isAdmin(any())).thenReturn(true);
         userContext = authService.authenticateByToken("some token", null);
-        assertThat(userContext.getRoles().size(), is(equalTo(3)));
-        assertThat(userContext.getRoles(), containsInAnyOrder(User.ADMIN, User.ORGANISATION_ADMIN, User.USER));
+        assertThat(userContext.getRoles().size(), is(equalTo(0)));
     }
 
     @Test
-    public void shouldSetcontextBasedOnUserId() throws SigningKeyNotFoundException {
+    public void shouldSetContextBasedOnUserId() throws SigningKeyNotFoundException {
         Organisation organisation = new Organisation();
         when(organisationRepository.findOne(1L)).thenReturn(organisation);
         when(userRepository.findById(100L)).thenReturn(Optional.of(user));

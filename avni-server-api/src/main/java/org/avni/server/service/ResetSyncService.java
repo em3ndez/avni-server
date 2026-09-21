@@ -1,9 +1,8 @@
 package org.avni.server.service;
 
-import org.avni.server.dao.IndividualRepository;
-import org.avni.server.dao.ResetSyncRepository;
-import org.avni.server.dao.SubjectTypeRepository;
-import org.avni.server.dao.UserRepository;
+import org.avni.server.application.projections.BaseProjection;
+import org.avni.server.application.projections.CatchmentAddressProjection;
+import org.avni.server.dao.*;
 import org.avni.server.domain.*;
 import org.avni.server.util.JsonObjectUtil;
 import org.avni.server.web.request.CatchmentContract;
@@ -17,6 +16,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -27,21 +27,22 @@ public class ResetSyncService {
     private final UserRepository userRepository;
     private final IndividualRepository individualRepository;
     private final SubjectTypeRepository subjectTypeRepository;
+    private final LocationRepository locationRepository;
 
     @Autowired
-    public ResetSyncService(ResetSyncRepository resetSyncRepository, UserRepository userRepository, IndividualRepository individualRepository, SubjectTypeRepository subjectTypeRepository) {
+    public ResetSyncService(ResetSyncRepository resetSyncRepository, UserRepository userRepository, IndividualRepository individualRepository, SubjectTypeRepository subjectTypeRepository, LocationRepository locationRepository) {
         this.resetSyncRepository = resetSyncRepository;
         this.userRepository = userRepository;
         this.individualRepository = individualRepository;
         this.subjectTypeRepository = subjectTypeRepository;
+        this.locationRepository = locationRepository;
     }
 
     public void recordCatchmentChange(Catchment savedCatchment, CatchmentContract request) {
         List<User> usersAssignedThisCatchment = userRepository.findByCatchmentAndIsVoidedFalse(savedCatchment);
         List<Long> savedLocationIds = savedCatchment.getAddressLevels().stream().map(AddressLevel::getId).collect(Collectors.toList());
         if (!usersAssignedThisCatchment.isEmpty() &&
-                isCatchmentChanged(savedLocationIds, request.getLocationIds()) &&
-                hasSubjectsInNewLocation(savedLocationIds, request.getLocationIds())) {
+                isCatchmentChanged(savedLocationIds, request.getLocationIds())) {
             List<ResetSync> resetSyncList = usersAssignedThisCatchment.stream().map(user -> {
                 ResetSync resetSync = buildNewResetSync();
                 resetSync.setUser(user);
@@ -52,11 +53,34 @@ public class ResetSyncService {
     }
 
     public void recordSyncAttributeChange(SubjectType savedSubjectType, SubjectTypeContractWeb request) {
-        if (individualRepository.existsBySubjectTypeUuid(savedSubjectType.getUuid()) &&
+        if (individualRepository.existsBySubjectTypeId(savedSubjectType.getId()) &&
                 anySyncAttributeChanged(savedSubjectType, request)) {
             ResetSync resetSync = buildNewResetSync();
             resetSync.setSubjectType(savedSubjectType);
             resetSyncRepository.save(resetSync);
+        }
+    }
+
+    public void recordLocationParentChange(AddressLevel addressLevel, Long oldParentId) {
+        String lquery = "*.".concat(addressLevel.getLineage()).concat(".*");
+        List<AddressLevel> allChildLocations = locationRepository.getAllChildLocations(lquery);
+        List<Long> allChildLocationIds = allChildLocations.stream().map(AddressLevel::getId).collect(Collectors.toList());
+        if (individualRepository.hasSubjectsInLocations(allChildLocationIds)) {
+            List<Long> addressLevelIdsToBeChecked = new ArrayList<>(Collections.singletonList(addressLevel.getId()));
+            addressLevelIdsToBeChecked.addAll(locationRepository.getParents(addressLevel.getParentUuid()).stream().map(BaseProjection::getId).collect(Collectors.toList()));
+            addressLevelIdsToBeChecked.addAll(locationRepository.getParents(locationRepository.findById(oldParentId).get().getUuid()).stream().map(BaseProjection::getId).collect(Collectors.toList()));
+            List<Long> virtualCatchmentIdsForAddressLevelIds = locationRepository.getCatchmentAddressesForAddressLevelIds(addressLevelIdsToBeChecked).stream()
+                .map(CatchmentAddressProjection::getCatchment_id)
+                .collect(Collectors.toList());
+            List<ResetSync> resetSyncRecords = new ArrayList<>();
+            userRepository.findByCatchment_IdInAndIsVoidedFalse(virtualCatchmentIdsForAddressLevelIds)
+                .forEach(user -> {
+                    ResetSync resetSync = buildNewResetSync();
+                    resetSync.setUser(user);
+                    resetSyncRecords.add(resetSync);
+                });
+
+            if (!resetSyncRecords.isEmpty()) resetSyncRepository.saveAll(resetSyncRecords);
         }
     }
 
@@ -67,8 +91,12 @@ public class ResetSyncService {
     }
 
     public void recordSyncAttributeValueChangeForUser(User savedUser, UserContract userContract, JsonObject newSyncSettings) {
+        recordSyncAttributeValueChangeForUser(savedUser, userContract.getCatchmentId(), newSyncSettings);
+    }
+
+    public void recordSyncAttributeValueChangeForUser(User savedUser, Long newCatchmentId, JsonObject newSyncSettings) {
         Long savedCatchmentId = savedUser.getCatchmentId().orElse(null);
-        if (isChanged(savedCatchmentId, userContract.getCatchmentId())) {
+        if (isChanged(savedCatchmentId, newCatchmentId)) {
             ResetSync resetSync = buildNewResetSync();
             resetSync.setUser(savedUser);
             resetSyncRepository.save(resetSync);
@@ -103,7 +131,7 @@ public class ResetSyncService {
 
     private boolean isSyncConcept2Changed(UserSyncSettings olderSettings, UserSyncSettings newSettings) {
         return isChanged(olderSettings.getSyncConcept2(), newSettings.getSyncConcept2()) ||
-                isConceptValueChanged(olderSettings.getSyncConcept2Values(), newSettings.getSyncConcept2Values());
+            isConceptValueChanged(olderSettings.getSyncConcept2Values(), newSettings.getSyncConcept2Values());
     }
 
     private boolean isCatchmentChanged(List<Long> savedLocationIds, List<Long> locationIdsPassedInRequest) {
@@ -116,7 +144,7 @@ public class ResetSyncService {
         List<Long> removedIds = new ArrayList<>(savedLocationIds);
         removedIds.removeAll(locationIdsPassedInRequest);
         return individualRepository.hasSubjectsInLocations(newlyAddedIds) ||
-                individualRepository.hasSubjectsInLocations(removedIds);
+            individualRepository.hasSubjectsInLocations(removedIds);
     }
 
     private ResetSync buildNewResetSync() {

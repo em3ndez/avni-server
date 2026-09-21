@@ -1,6 +1,7 @@
 package org.avni.server.web.contract;
 
 import org.avni.server.domain.DeclarativeRule;
+import org.avni.server.domain.Program;
 
 public class ProgramContract {
     private String name;
@@ -12,6 +13,7 @@ public class ProgramContract {
     private String enrolmentSummaryRule;
     private DeclarativeRule enrolmentEligibilityCheckDeclarativeRule;
     private boolean manualEligibilityCheckRequired;
+    private boolean showGrowthChart;
     private String manualEnrolmentEligibilityCheckRule;
     private DeclarativeRule manualEnrolmentEligibilityCheckDeclarativeRule;
     private boolean allowMultipleEnrolments;
@@ -22,6 +24,14 @@ public class ProgramContract {
 
     public void setManualEligibilityCheckRequired(boolean manualEligibilityCheckRequired) {
         this.manualEligibilityCheckRequired = manualEligibilityCheckRequired;
+    }
+
+    public boolean isShowGrowthChart() {
+        return showGrowthChart;
+    }
+
+    public void setShowGrowthChart(boolean showGrowthChart) {
+        this.showGrowthChart = showGrowthChart;
     }
 
     public String getManualEnrolmentEligibilityCheckRule() {
@@ -110,5 +120,19 @@ public class ProgramContract {
 
     public void setAllowMultipleEnrolments(boolean allowMultipleEnrolments) {
         this.allowMultipleEnrolments = allowMultipleEnrolments;
+    }
+
+    public static ProgramContract createBasic(Program program) {
+        ProgramContract contract = new ProgramContract();
+        contract.setName(program.getName());
+        contract.setUuid(program.getUuid());
+        return contract;
+    }
+
+    @Override
+    public String toString() {
+        return "{" +
+                "uuid='" + uuid + '\'' +
+                '}';
     }
 }

@@ -1,5 +1,6 @@
 package org.avni.server.service;
 
+import org.avni.server.common.BulkItemSaveException;
 import org.avni.server.dao.GenderRepository;
 import org.avni.server.dao.individualRelationship.IndividualRelationGenderMappingRepository;
 import org.avni.server.dao.individualRelationship.IndividualRelationRepository;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.joda.time.DateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -49,14 +51,15 @@ public class IndividualRelationService implements NonScopeAwareService {
     }
 
     public void uploadRelation(IndividualRelationContract individualRelationContract) {
+        String uuid = individualRelationContract.getUuid();
         String name = individualRelationContract.getName();
-        IndividualRelation individualRelation = individualRelationRepository.findByName(name);
+        IndividualRelation individualRelation = individualRelationRepository.findByUuidOrName(uuid, name);
         if (individualRelation == null) {
             individualRelation = new IndividualRelation();
-            individualRelation.setName(name);
-            String uuid = individualRelationContract.getUuid();
             individualRelation.setUuid(uuid == null ? UUID.randomUUID().toString() : uuid);
         }
+        individualRelation.setName(name); //Update name if changed
+        individualRelation.setVoided(individualRelationContract.isVoided());
         IndividualRelation savedRelation = individualRelationRepository.save(individualRelation);
         saveGenderMappings(individualRelationContract, savedRelation);
     }
@@ -129,8 +132,32 @@ public class IndividualRelationService implements NonScopeAwareService {
         }
     }
 
+    public void deleteRelation(Long id) {
+        Optional<IndividualRelation> relation = individualRelationRepository.findById(id);
+        if (relation.isPresent()) {
+            IndividualRelation individualRelation = relation.get();
+            individualRelation.setVoided(true);
+
+            for (IndividualRelationGenderMapping individualRelationGenderMapping : individualRelation.getGenderMappings()) {
+                individualRelationGenderMapping.setVoided(true);
+            }
+
+            individualRelationRepository.save(individualRelation);
+        }
+    }
+
     @Override
     public boolean isNonScopeEntityChanged(DateTime lastModifiedDateTime) {
         return individualRelationRepository.existsByLastModifiedDateTimeGreaterThan(lastModifiedDateTime);
+    }
+
+    public void saveRelations(IndividualRelationContract[] individualRelationContracts) {
+        for (IndividualRelationContract individualRelationContract : individualRelationContracts) {
+            try {
+                uploadRelation(individualRelationContract);
+            } catch (Exception e) {
+                throw new BulkItemSaveException(individualRelationContract, e);
+            }
+        }
     }
 }

@@ -1,14 +1,19 @@
 package org.avni.server.service;
 
+import org.avni.server.common.EntityHelper;
 import org.avni.server.dao.DashboardRepository;
 import org.avni.server.dao.GroupDashboardRepository;
 import org.avni.server.dao.GroupRepository;
-import org.avni.server.domain.GroupDashboard;
+import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.web.contract.GroupDashboardBundleContract;
 import org.avni.server.web.request.GroupDashboardContract;
 import org.joda.time.DateTime;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -25,28 +30,69 @@ public class GroupDashboardService implements NonScopeAwareService {
         this.groupRepository = groupRepository;
     }
 
-    public GroupDashboard save(GroupDashboardContract contract) {
-        GroupDashboard groupDashboard = groupDashboardRepository.findByUuid(contract.getUuid());
-        if (groupDashboard == null) {
-            groupDashboard = new GroupDashboard();
+    public List<GroupDashboard> save(List<GroupDashboardContract> request) throws ValidationException {
+        List<GroupDashboard> groupDashboards = new ArrayList<>();
+        for (GroupDashboardContract contract : request) {
+            GroupDashboard groupDashboard = EntityHelper.newOrExistingEntity(groupDashboardRepository, contract.getUuid(), contract.getId(), new GroupDashboard());
+            Group group = groupRepository.findOne(contract.getGroupId());
+            Dashboard dashboard = dashboardRepository.findOne(contract.getDashboardId());
+            if (dashboard == null || group == null) {
+                throw new ValidationException(String.format("Invalid dashboard id %d or group id %d", contract.getDashboardId(), contract.getGroupId()));
+            }
+            groupDashboard.setDashboard(dashboard);
+            groupDashboard.setGroup(group);
+            groupDashboard.setOrganisationId(UserContextHolder.getUserContext().getOrganisationId());
+            groupDashboards.add(groupDashboard);
         }
-        contract.setUuid(UUID.randomUUID().toString());
-        groupDashboard.setUuid(contract.getUuid());
-        return buildAndSave(contract, groupDashboard);
+        return groupDashboards;
+    }
+
+    public void saveFromBundle(List<GroupDashboardBundleContract> request) {
+        List<GroupDashboard> groupDashboards = new ArrayList<>();
+        for (GroupDashboardBundleContract contract : request) {
+            Long organisationId = UserContextHolder.getUserContext().getOrganisationId();
+            GroupDashboard groupDashboard = EntityHelper.newOrExistingEntity(groupDashboardRepository, contract.getUuid(), null, new GroupDashboard());
+            Group group = null;
+            if (contract.isGroupOneOfTheDefaultGroups() && !StringUtils.isEmpty(contract.getGroupName())) {
+                group = groupRepository.findByNameAndOrganisationId(contract.getGroupName(), organisationId);
+            } else {
+                group = groupRepository.findByUuid(contract.getGroupUUID());
+            }
+            if (group == null) {
+                throw new RuntimeException("Unable to process import of Group Dashboards, due to missing mandatory details."
+                        + "\nPlease download a newer version of the bundle from the source organisation and try uploading again.");
+            }
+            Dashboard dashboard = dashboardRepository.findByUuid(contract.getDashboardUUID());
+            groupDashboard.setDashboard(dashboard);
+            groupDashboard.setGroup(group);
+            groupDashboard.setOrganisationId(organisationId);
+            groupDashboard.setPrimaryDashboard(contract.isPrimaryDashboard());
+            groupDashboard.setSecondaryDashboard(contract.isSecondaryDashboard());
+            groupDashboard.setVoided(contract.isVoided());
+            groupDashboards.add(groupDashboard);
+        }
+        groupDashboardRepository.saveAll(groupDashboards);
     }
 
     private GroupDashboard buildAndSave(GroupDashboardContract contract, GroupDashboard groupDashboard) {
         groupDashboard.setDashboard(dashboardRepository.findOne(contract.getDashboardId()));
         groupDashboard.setGroup(groupRepository.findOne(contract.getGroupId()));
         groupDashboard.setPrimaryDashboard(contract.isPrimaryDashboard());
+        groupDashboard.setSecondaryDashboard(contract.isSecondaryDashboard());
         groupDashboard = groupDashboardRepository.save(groupDashboard);
+
+        List<GroupDashboard> otherGroupDashboards = groupDashboardRepository.findByGroup_IdAndIdNotAndIsVoidedFalse(contract.getGroupId(), groupDashboard.getId());
         if (contract.isPrimaryDashboard()) {
-            List<GroupDashboard> nonPrimaryDashboards = groupDashboardRepository.findByGroup_IdAndIdNotAndIsVoidedFalse(contract.getGroupId(), groupDashboard.getId());
-            for (GroupDashboard nonPrimaryDashboard : nonPrimaryDashboards) {
+            for (GroupDashboard nonPrimaryDashboard : otherGroupDashboards) {
                 nonPrimaryDashboard.setPrimaryDashboard(false);
             }
-            groupDashboardRepository.saveAll(nonPrimaryDashboards);
         }
+        if (contract.isSecondaryDashboard()) {
+            for (GroupDashboard nonPrimaryDashboard : otherGroupDashboards) {
+                nonPrimaryDashboard.setSecondaryDashboard(false);
+            }
+        }
+        groupDashboardRepository.saveAll(otherGroupDashboards);
         return groupDashboard;
     }
 
@@ -56,6 +102,16 @@ public class GroupDashboardService implements NonScopeAwareService {
 
     public void delete(GroupDashboard groupDashboard) {
         groupDashboard.setVoided(true);
+        groupDashboardRepository.save(groupDashboard);
+    }
+
+    public void createDefaultGroupDashboardForOrg(Organisation organisation, Group group, Dashboard dashboard) {
+        GroupDashboard groupDashboard = new GroupDashboard();
+        groupDashboard.setOrganisationId(organisation.getId());
+        groupDashboard.setUuid(UUID.randomUUID().toString());
+        groupDashboard.setGroup(group);
+        groupDashboard.setDashboard(dashboard);
+        groupDashboard.setPrimaryDashboard(true);
         groupDashboardRepository.save(groupDashboard);
     }
 

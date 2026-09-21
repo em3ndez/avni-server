@@ -10,8 +10,10 @@ import org.avni.server.domain.CHSBaseEntity;
 import org.avni.server.domain.EncounterType;
 import org.avni.server.domain.Program;
 import org.avni.server.domain.SubjectType;
+import org.avni.server.domain.accessControl.PrivilegeType;
 import org.avni.server.exporter.ExportJobService;
 import org.avni.server.service.ExportS3Service;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.util.ObjectMapperSingleton;
 import org.avni.server.web.external.request.export.ExportJobRequest;
 import org.avni.server.web.external.request.export.ExportOutput;
@@ -23,7 +25,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.io.IOException;
@@ -40,25 +42,27 @@ public class ExportController {
     private final SubjectTypeRepository subjectTypeRepository;
     private final ProgramRepository programRepository;
     private final EncounterTypeRepository encounterTypeRepository;
+    private final AccessControlService accessControlService;
 
     @Autowired
-    public ExportController(ExportJobService exportJobService, ExportS3Service exportS3Service, SubjectTypeRepository subjectTypeRepository, ProgramRepository programRepository, EncounterTypeRepository encounterTypeRepository) {
+    public ExportController(ExportJobService exportJobService, ExportS3Service exportS3Service, SubjectTypeRepository subjectTypeRepository, ProgramRepository programRepository, EncounterTypeRepository encounterTypeRepository, AccessControlService accessControlService) {
         this.exportJobService = exportJobService;
         this.exportS3Service = exportS3Service;
         this.subjectTypeRepository = subjectTypeRepository;
         this.programRepository = programRepository;
         this.encounterTypeRepository = encounterTypeRepository;
+        this.accessControlService = accessControlService;
     }
 
     @RequestMapping(value = "/export", method = RequestMethod.POST)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     public ResponseEntity<?> getVisitData(@RequestBody ExportJobRequest exportJobRequest) {
+        accessControlService.checkPrivilege(PrivilegeType.Analytics);
         return exportJobService.runExportJob(exportJobRequest);
     }
 
     @RequestMapping(value = "/export/v2", method = RequestMethod.POST)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     public ResponseEntity<?> getVisitDataV2(@RequestBody ExportV2JobRequest exportJobRequest) {
+        accessControlService.checkPrivilege(PrivilegeType.Analytics);
         ExportOutput exportOutput = getExportOutput(exportJobRequest);
         ResponseEntity<?> validationErrorResponseEntity = validateHeader(exportOutput);
         if(validationErrorResponseEntity != null) {
@@ -80,12 +84,14 @@ public class ExportController {
     }
 
     @RequestMapping(value = "/export/status", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin', 'admin')")
+    @Transactional(readOnly = true)
     public Page<JobStatus> getUploadStatus(Pageable pageable) {
+        accessControlService.checkPrivilege(PrivilegeType.Analytics);
         return exportJobService.getAll(pageable);
     }
 
     @RequestMapping(value = "/export/download", method = RequestMethod.GET)
+    @Transactional(readOnly = true, rollbackFor = Exception.class)
     public ResponseEntity<?> downloadFile(@RequestParam String fileName) throws IOException {
         InputStream inputStream = exportS3Service.downloadFile(fileName);
         byte[] bytes = IOUtils.toByteArray(inputStream);

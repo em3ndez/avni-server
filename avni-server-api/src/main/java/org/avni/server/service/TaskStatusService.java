@@ -1,9 +1,11 @@
 package org.avni.server.service;
 
+import org.avni.server.common.BulkItemSaveException;
 import org.avni.server.common.EntityHelper;
 import org.avni.server.dao.task.TaskStatusRepository;
 import org.avni.server.dao.task.TaskTypeRepository;
 import org.avni.server.domain.task.TaskStatus;
+import org.avni.server.domain.task.TaskType;
 import org.avni.server.web.request.webapp.task.TaskStatusContract;
 import org.joda.time.DateTime;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,7 +50,12 @@ public class TaskStatusService implements NonScopeAwareService {
 
     public TaskStatus importTaskStatus(TaskStatusContract request) {
         TaskStatus taskStatus = buildTaskStatus(request);
-        taskStatus.setTaskType(taskTypeRepository.findByUuid(request.getTaskTypeUUID()));
+        TaskType taskType = request.getTaskTypeUUID() == null ? null : taskTypeRepository.findByUuid(request.getTaskTypeUUID());
+        if (taskType == null && request.getTaskTypeId() != null) {
+            // legacy bundles may carry only the source org's numeric taskTypeId
+            taskType = taskTypeRepository.findById(request.getTaskTypeId().longValue());
+        }
+        taskStatus.setTaskType(taskType);
         taskStatusRepository.save(taskStatus);
         return taskStatus;
     }
@@ -62,4 +69,15 @@ public class TaskStatusService implements NonScopeAwareService {
         return taskStatus;
     }
 
+    public void saveTaskStatuses(TaskStatusContract[] taskStatusContracts) {
+        for (TaskStatusContract taskStatusContract : taskStatusContracts) {
+            try {
+                // bundle import: the contract's taskTypeId is the source org's primary key,
+                // so the task type must be resolved by uuid
+                importTaskStatus(taskStatusContract);
+            } catch (Exception e) {
+                throw new BulkItemSaveException(taskStatusContract, e);
+            }
+        }
+    }
 }

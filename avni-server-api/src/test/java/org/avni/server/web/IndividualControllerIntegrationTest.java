@@ -1,12 +1,12 @@
 package org.avni.server.web;
 
 import org.avni.server.common.AbstractControllerIntegrationTest;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
 import org.avni.server.dao.IndividualRepository;
 import org.avni.server.domain.Individual;
 import org.avni.server.domain.JsonObject;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.jdbc.Sql;
@@ -24,7 +24,7 @@ public class IndividualControllerIntegrationTest extends AbstractControllerInteg
     @Autowired
     private IndividualRepository individualRepository;
 
-    private String INDIVIDUAL_UUID = "0a1bf764-4576-4d71-b8ec-25895a113e81";
+    private final String INDIVIDUAL_UUID = "0a1bf764-4576-4d71-b8ec-25895a113e81";
 
     @Before
     public void setUp() throws Exception {
@@ -46,6 +46,32 @@ public class IndividualControllerIntegrationTest extends AbstractControllerInteg
 
             Individual newIndividual = individualRepository.findByUuid(INDIVIDUAL_UUID);
             assertThat(newIndividual).isNotNull();
+
+        } catch (IOException e) {
+            Assert.fail();
+        }
+    }
+
+    /**
+     * TODO Remove this after finding root cause of overwrite of observations to empty
+     */
+    @Test
+    public void ensureUpdateExistingIndividualWithEmptyObsFails() {
+        try {
+            Object json = mapper.readValue(this.getClass().getResource("/ref/individual/NonEmptyObsIndividual.json"), Object.class);
+            post("/individuals", json);
+
+            Individual newIndividual = individualRepository.findByUuid(INDIVIDUAL_UUID);
+            assertThat(newIndividual).isNotNull();
+
+            json = mapper.readValue(this.getClass().getResource("/ref/individual/newIndividual.json"), Object.class);
+            post("/individuals", json);
+
+            Individual updatedIndividual = individualRepository.findByUuid(INDIVIDUAL_UUID);
+            assertThat(updatedIndividual).isNotNull();
+            assertThat(updatedIndividual.getObservations().size()).isGreaterThan(0);
+            assertThat(updatedIndividual.getObservations().size()).isEqualTo(newIndividual.getObservations().size());
+            assertThat(updatedIndividual.getLastModifiedDateTime()).isNotEqualTo(newIndividual.getLastModifiedDateTime());
 
         } catch (IOException e) {
             Assert.fail();

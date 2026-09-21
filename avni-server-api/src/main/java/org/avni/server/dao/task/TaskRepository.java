@@ -1,5 +1,6 @@
 package org.avni.server.dao.task;
 
+import jakarta.persistence.criteria.*;
 import org.avni.server.dao.FindByLastModifiedDateTime;
 import org.avni.server.dao.TransactionalDataRepository;
 import org.avni.server.domain.Concept;
@@ -14,10 +15,8 @@ import org.springframework.data.domain.Slice;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Repository;
 
-import javax.persistence.criteria.*;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -25,7 +24,6 @@ import java.util.Map;
 
 @Repository
 @RepositoryRestResource(collectionResourceRel = "task", path = "task", exported = false)
-@PreAuthorize("hasAnyAuthority('user')")
 public interface TaskRepository extends TransactionalDataRepository<Task>, FindByLastModifiedDateTime<Task> {
 
     Page<Task> findByAssignedToAndLastModifiedDateTimeIsBetweenOrderByLastModifiedDateTimeAscIdAsc(User user, Date lastModifiedDateTime, Date now, Pageable pageable);

@@ -1,36 +1,29 @@
 package org.avni.server.dao;
 
+import jakarta.persistence.criteria.*;
 import org.avni.server.application.projections.WebSearchResultProjection;
-import org.avni.server.domain.AddressLevel;
-import org.avni.server.domain.Concept;
-import org.avni.server.domain.Individual;
-import org.avni.server.domain.SubjectType;
+import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.projection.IndividualWebProjection;
+import org.avni.server.util.S;
 import org.joda.time.DateTime;
 import org.joda.time.LocalDate;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
-import org.springframework.data.domain.Slice;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.rest.core.annotation.RepositoryRestResource;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Repository;
 import org.springframework.util.StringUtils;
 
-import javax.persistence.criteria.*;
-import java.util.Date;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
 @Repository
 @RepositoryRestResource(collectionResourceRel = "individual", path = "individual", exported = false)
-@PreAuthorize("hasAnyAuthority('user','admin')")
-public interface IndividualRepository extends TransactionalDataRepository<Individual>, OperatingIndividualScopeAwareRepository<Individual> {
-
+public interface IndividualRepository extends TransactionalDataRepository<Individual>, OperatingIndividualScopeAwareRepository<Individual>, SubjectTreeItemRepository {
     @Override
     default Specification<Individual> syncTypeIdSpecification(Long typeId) {
         return (Root<Individual> root, CriteriaQuery<?> query, CriteriaBuilder cb) ->
@@ -38,10 +31,14 @@ public interface IndividualRepository extends TransactionalDataRepository<Indivi
     }
 
     @Override
-    default boolean isEntityChangedForCatchment(SyncParameters syncParameters) {
-        return count(syncEntityChangedAuditSpecification(syncParameters)
-                .and(syncTypeIdSpecification(syncParameters.getTypeId()))
-                .and(syncStrategySpecification(syncParameters))
+    default boolean isEntityChanged(SyncParameters syncParameters) {
+        Specification<Individual> audit = syncEntityChangedAuditSpecification(syncParameters);
+        Specification<Individual> subjectType = syncTypeIdSpecification(syncParameters.getTypeId());
+        Specification<Individual> location_AndDirectAssignment_AndSyncAttributes = syncStrategySpecification(syncParameters);
+        return count(audit
+                .and(subjectType)
+                .and(location_AndDirectAssignment_AndSyncAttributes)
+                .and(syncDisabledSpecification())
         ) > 0;
     }
 
@@ -151,10 +148,10 @@ public interface IndividualRepository extends TransactionalDataRepository<Indivi
     @Query(value = "select firstname,lastname,fullname,id,uuid,title_lineage,subject_type_name,gender_name,date_of_birth,enrolments,total_elements from web_search_function(:jsonSearch, :dbUser)", nativeQuery = true)
     List<WebSearchResultProjection> getWebSearchResults(String jsonSearch, String dbUser);
 
-    default Specification<Individual> findBySubjectTypeSpec(String subjectType) {
+    default Specification<Individual> findBySubjectTypeSpec(String subjectTypeName) {
         Specification<Individual> spec = (Root<Individual> root, CriteriaQuery<?> query, CriteriaBuilder cb) -> {
             Join<Individual, SubjectType> subjectTypeJoin = root.join("subjectType", JoinType.LEFT);
-            return cb.and(cb.equal(subjectTypeJoin.get("name"), subjectType));
+            return cb.and(cb.equal(subjectTypeJoin.get("name"), subjectTypeName));
         };
         return spec;
     }
@@ -164,35 +161,41 @@ public interface IndividualRepository extends TransactionalDataRepository<Indivi
                 addressIds.isEmpty() ? null : root.get("addressLevel").get("id").in(addressIds);
     }
 
-    default Page<Individual> findByConcepts(Date lastModifiedDateTime, Date now, Map<Concept, String> concepts, List<Long> addressIds, Pageable pageable) {
-        return findAll(lastModifiedBetween(lastModifiedDateTime, now)
-                .and(withConceptValues(concepts, "observations"))
-                .and(findInLocationSpec(addressIds)), pageable);
-    }
-
-    default Page<Individual> findByConceptsAndSubjectType(Date lastModifiedDateTime, Date now, Map<Concept, String> concepts, String subjectType, List<Long> addressIds, Pageable pageable) {
-        return findAll(lastModifiedBetween(lastModifiedDateTime, now)
-                .and(withConceptValues(concepts, "observations"))
-                .and(findBySubjectTypeSpec(subjectType))
-                .and(findInLocationSpec(addressIds)), pageable);
+    default Page<Individual> findSubjects(IndividualSearchParams individualSearchParams, Pageable pageable) {
+        Specification specification = withConceptValues(individualSearchParams.getObservations(), "observations")
+                .and(inCurrentOrganisation());
+        if (individualSearchParams.getLastModifiedDateTime() != null)
+            specification = specification.and(lastModifiedBetween(CHSEntity.toDate(individualSearchParams.getLastModifiedDateTime()), CHSEntity.toDate(individualSearchParams.getNow())));
+        if (!individualSearchParams.getAllLocationIds().isEmpty())
+            specification = specification.and(findInLocationSpec(individualSearchParams.getAllLocationIds()));
+        if (!S.isEmpty((individualSearchParams.getSubjectTypeName())))
+            specification = specification.and(findBySubjectTypeSpec(individualSearchParams.getSubjectTypeName()));
+        return findAll(specification, pageable);
     }
 
     List<Individual> findAllByAddressLevelAndSubjectTypeAndIsVoidedFalse(AddressLevel addressLevel, SubjectType subjectType);
+    List<Individual> findAllByAddressLevelAndSubjectType(AddressLevel addressLevel, SubjectType subjectType);
 
-    List<IndividualWebProjection> findAllByUuidIn(List<String> uuids);
+    List<IndividualWebProjection> findAllIndividualWebProjectionByUuidIn(List<String> uuids);
 
     @Modifying(clearAutomatically = true)
     @Query(value = "update individual i set " +
             "sync_concept_1_value = CAST((i.observations ->> CAST(:syncAttribute1 as text)) as text), " +
-            "sync_concept_2_value = CAST((i.observations ->> CAST(:syncAttribute2 as text)) as text) " +
+            "sync_concept_2_value = CAST((i.observations ->> CAST(:syncAttribute2 as text)) as text), " +
+            "last_modified_date_time = (current_timestamp + i.id * (interval '1 millisecond')/1000), last_modified_by_id = :lastModifiedById " +
             "where i.subject_type_id = :subjectTypeId", nativeQuery = true)
-    void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2);
+    void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2, Long lastModifiedById);
+
+    default void updateConceptSyncAttributesForSubjectType(Long subjectTypeId, String syncAttribute1, String syncAttribute2) {
+        this.updateConceptSyncAttributesForSubjectType(subjectTypeId, syncAttribute1, syncAttribute2, UserContextHolder.getUserId());
+    }
 
     boolean existsByAddressLevelIdIn(List<Long> addressIds);
     default boolean hasSubjectsInLocations(List<Long> addressIds) {
         return addressIds.isEmpty() ? false : existsByAddressLevelIdIn(addressIds);
     }
     boolean existsBySubjectTypeUuid(String subjectTypeUUID);
+    boolean existsBySubjectTypeId(Long subjectTypeId);
 
     default Individual getSubject(String uuid, String legacyId) {
         Individual individual = null;
@@ -204,4 +207,13 @@ public interface IndividualRepository extends TransactionalDataRepository<Indivi
         }
         return individual;
     }
+
+    @Modifying
+    @Query(value = "update individual i set is_voided = true, last_modified_date_time = (current_timestamp + random() * 5000 * (interval '1 millisecond')), last_modified_by_id = :lastModifiedById where i.address_id = :addressId and i.is_voided = false", nativeQuery = true)
+    void voidSubjectItemsAt(Long addressId, Long lastModifiedById);
+    default void voidSubjectItemsAt(AddressLevel address) {
+        this.voidSubjectItemsAt(address.getId(), UserContextHolder.getUserId());
+    }
+
+    int countBySyncDisabled(boolean syncDisabled);
 }

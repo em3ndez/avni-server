@@ -5,12 +5,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
 import org.avni.server.application.Format;
 import org.avni.server.domain.DeclarativeRule;
+import org.avni.server.domain.JsonObject;
 import org.avni.server.domain.SubjectType;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonPropertyOrder({"name", "uuid"})
 public class SubjectTypeContract extends ReferenceDataContract {
-
     @JsonProperty(value = "group")
     private boolean isGroup;
 
@@ -24,6 +24,7 @@ public class SubjectTypeContract extends ReferenceDataContract {
     private String subjectSummaryRule;
 
     private String programEligibilityCheckRule;
+    private String memberAdditionEligibilityCheckRule;
 
     private DeclarativeRule programEligibilityCheckDeclarativeRule;
 
@@ -51,6 +52,8 @@ public class SubjectTypeContract extends ReferenceDataContract {
     @JsonProperty(value = "syncRegistrationConcept2Usable")
     private Boolean isSyncRegistrationConcept2Usable;
     private String nameHelpText;
+    private JsonObject settings;
+    private boolean attendanceEnabled;
 
     public static SubjectTypeContract fromSubjectType(SubjectType subjectType) {
         SubjectTypeContract contract = new SubjectTypeContract();
@@ -63,6 +66,7 @@ public class SubjectTypeContract extends ReferenceDataContract {
         contract.setType(subjectType.getType().name());
         contract.setSubjectSummaryRule(subjectType.getSubjectSummaryRule());
         contract.setProgramEligibilityCheckRule(subjectType.getProgramEligibilityCheckRule());
+        contract.setMemberAdditionEligibilityCheckRule(subjectType.getMemberAdditionEligibilityCheckRule());
         contract.setProgramEligibilityCheckDeclarativeRule(subjectType.getProgramEligibilityCheckDeclarativeRule());
         contract.setAllowEmptyLocation(subjectType.isAllowEmptyLocation());
         contract.setAllowProfilePicture(subjectType.isAllowProfilePicture());
@@ -80,6 +84,16 @@ public class SubjectTypeContract extends ReferenceDataContract {
         contract.setSyncRegistrationConcept2Usable(subjectType.isSyncRegistrationConcept2Usable());
         contract.setNameHelpText(subjectType.getNameHelpText());
         contract.setIconFileS3Key(subjectType.getIconFileS3Key());
+        contract.setSettings(subjectType.getSettings());
+        contract.setAttendanceEnabled(subjectType.isAttendanceEnabled());
+        return contract;
+    }
+
+    public static SubjectTypeContract createBasic(SubjectType subjectType) {
+        SubjectTypeContract contract = new SubjectTypeContract();
+        contract.setName(subjectType.getName());
+        contract.setUuid(subjectType.getUuid());
+        contract.setType(subjectType.getType().name());
         return contract;
     }
 
@@ -259,11 +273,35 @@ public class SubjectTypeContract extends ReferenceDataContract {
         this.programEligibilityCheckRule = programEligibilityCheckRule;
     }
 
+    public String getMemberAdditionEligibilityCheckRule() {
+        return memberAdditionEligibilityCheckRule;
+    }
+
+    public void setMemberAdditionEligibilityCheckRule(String memberAdditionEligibilityCheckRule) {
+        this.memberAdditionEligibilityCheckRule = memberAdditionEligibilityCheckRule;
+    }
+
     public DeclarativeRule getProgramEligibilityCheckDeclarativeRule() {
         return programEligibilityCheckDeclarativeRule;
     }
 
     public void setProgramEligibilityCheckDeclarativeRule(DeclarativeRule programEligibilityCheckDeclarativeRule) {
         this.programEligibilityCheckDeclarativeRule = programEligibilityCheckDeclarativeRule;
+    }
+
+    public JsonObject getSettings() {
+        return settings;
+    }
+
+    public void setSettings(JsonObject settings) {
+        this.settings = settings;
+    }
+
+    public boolean isAttendanceEnabled() {
+        return attendanceEnabled;
+    }
+
+    public void setAttendanceEnabled(boolean attendanceEnabled) {
+        this.attendanceEnabled = attendanceEnabled;
     }
 }

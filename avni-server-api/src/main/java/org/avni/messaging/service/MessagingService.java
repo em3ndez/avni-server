@@ -1,16 +1,24 @@
 package org.avni.messaging.service;
 
 import com.bugsnag.Bugsnag;
+import org.avni.messaging.contract.ManualMessageContract;
+import org.avni.messaging.contract.MessageRuleContract;
+import org.avni.messaging.contract.StartFlowForContactRequest;
 import org.avni.messaging.domain.*;
+import org.avni.messaging.domain.exception.GlificException;
 import org.avni.messaging.domain.exception.GlificGroupMessageFailureException;
+import org.avni.messaging.domain.exception.GlificNotConfiguredException;
 import org.avni.messaging.repository.ManualMessageRepository;
 import org.avni.messaging.repository.MessageRequestQueueRepository;
 import org.avni.messaging.repository.MessageRuleRepository;
 import org.avni.server.domain.RuleExecutionException;
+import org.avni.server.domain.User;
 import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.service.EntityTypeRetrieverService;
 import org.avni.server.service.RuleService;
 import org.avni.server.web.request.rules.response.ScheduleRuleResponseEntity;
 import org.joda.time.DateTime;
+import org.joda.time.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,12 +39,14 @@ public class MessagingService {
     private final MessageReceiverService messageReceiverService;
     private final MessageRequestService messageRequestService;
     private final RuleService ruleService;
-    private MessageRequestQueueRepository messageRequestQueueRepository;
-    private ManualMessageRepository manualMessageRepository;
-    private GroupMessagingService groupMessagingService;
-    private Bugsnag bugsnag;
+    private final MessageRequestQueueRepository messageRequestQueueRepository;
+    private final ManualMessageRepository manualMessageRepository;
+    private final GroupMessagingService groupMessagingService;
+    private final Bugsnag bugsnag;
 
-    private IndividualMessagingService individualMessagingService;
+    private final IndividualMessagingService individualMessagingService;
+    private final EntityTypeRetrieverService entityTypeRetrieverService;
+    private final FlowRequestQueueService flowRequestQueueService;
 
     @Autowired
     public MessagingService(MessageRuleRepository messageRuleRepository, MessageReceiverService messageReceiverService,
@@ -44,7 +54,8 @@ public class MessagingService {
                             MessageRequestQueueRepository messageRequestQueueRepository,
                             ManualMessageRepository manualMessageRepository,
                             RuleService ruleService, GroupMessagingService groupMessagingService,
-                            IndividualMessagingService individualMessagingService, Bugsnag bugsnag) {
+                            IndividualMessagingService individualMessagingService, Bugsnag bugsnag,
+                            EntityTypeRetrieverService entityTypeRetrieverService, FlowRequestQueueService flowRequestQueueService) {
         this.messageRuleRepository = messageRuleRepository;
         this.messageReceiverService = messageReceiverService;
         this.messageRequestService = messageRequestService;
@@ -54,6 +65,8 @@ public class MessagingService {
         this.groupMessagingService = groupMessagingService;
         this.bugsnag = bugsnag;
         this.individualMessagingService = individualMessagingService;
+        this.entityTypeRetrieverService = entityTypeRetrieverService;
+        this.flowRequestQueueService = flowRequestQueueService;
     }
 
     public MessageRule find(Long id) {
@@ -106,9 +119,33 @@ public class MessagingService {
         }
     }
 
-    @Transactional
+    public void onUserEntitySave(Long userId, User createdBy) throws RuleExecutionException {
+        List<MessageRule> messageRules = messageRuleRepository.findAllByReceiverTypeAndEntityTypeAndIsVoidedFalse(ReceiverType.User, EntityType.User);
+
+        for (MessageRule messageRule : messageRules) {
+            MessageReceiver messageReceiver = messageReceiverService.saveReceiverIfRequired(ReceiverType.User, userId);
+            ScheduleRuleResponseEntity scheduleRuleResponse = ruleService.executeScheduleRuleForEntityTypeUser(userId, messageRule.getScheduleRule());
+            Boolean shouldSend = scheduleRuleResponse.getShouldSend();
+            if (shouldSend == null || shouldSend) {
+                messageRequestService.createOrUpdateAutomatedMessageRequest(messageRule, messageReceiver, userId, scheduleRuleResponse.getScheduledDateTime());
+            }
+        }
+    }
+
     public Page<MessageRule> findByEntityTypeAndEntityTypeId(EntityType entityType, Long entityTypeId, Pageable pageable) {
         return messageRuleRepository.findByEntityTypeAndEntityTypeId(entityType, entityTypeId, pageable);
+    }
+
+    @Transactional
+    public void sendMessageSynchronously(ManualMessageContract manualMessageContract)
+            throws GlificNotConfiguredException, RuleExecutionException, PhoneNumberNotAvailableOrIncorrectException {
+        ManualMessage manualMessage = new ManualMessage(manualMessageContract.getMessageTemplateId(), manualMessageContract.getParameters());
+        manualMessage.assignUUIDIfRequired();
+        MessageReceiver messageReceiver = messageReceiverService.saveReceiverIfRequired(manualMessageContract.getReceiverType(),
+                Long.parseLong(manualMessageContract.getReceiverId()));
+        MessageRequest messageRequest = new MessageRequest(manualMessage, messageReceiver, manualMessageContract.getScheduledDateTime());
+        messageRequest.assignUUIDIfRequired();
+        sendMessageToGlific(messageRequest);
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -127,6 +164,7 @@ public class MessagingService {
                     "failed with message " + e.getMessage() + ".Will retry again after sometime.");
             bugsnag.notify(e);
         } catch (Exception e) {
+            messageRequest = messageRequestService.markFailed(messageRequest, MessageDeliveryStatus.Failed);
             logger.error("Could not send message for message request id: " + messageRequest.getId(), e);
             bugsnag.notify(e);
         }
@@ -135,13 +173,12 @@ public class MessagingService {
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void sendMessages() {
+    public void sendMessages(Duration duration) {
         logger.info("Sending messages for organisation " + UserContextHolder.getOrganisation().getName());
-        Stream<MessageRequest> requests = messageRequestQueueRepository.findDueMessageRequests();
+        Stream<MessageRequest> requests = messageRequestQueueRepository.findDueMessageRequests(duration);
         requests.forEach(this::sendMessage);
     }
 
-    @Transactional
     public void scheduleManualMessage(String receiverId, ReceiverType receiverType, String messageTemplateId, String[] parameters, DateTime scheduledDateTime) {
         ManualMessage manualMessage = new ManualMessage(messageTemplateId, parameters);
         manualMessage.assignUUIDIfRequired();
@@ -151,18 +188,37 @@ public class MessagingService {
         messageRequestService.createManualMessageRequest(manualMessage, messageReceiver, scheduledDateTime);
     }
 
-    private void sendMessageToGlific(MessageRequest messageRequest) throws PhoneNumberNotAvailableOrIncorrectException, RuleExecutionException {
-        if(messageRequest.getManualMessage() != null)
+    public void sendMessageToGlific(MessageRequest messageRequest) throws PhoneNumberNotAvailableOrIncorrectException, RuleExecutionException, GlificNotConfiguredException {
+        if (messageRequest.getManualMessage() != null)
             sendManualMessage(messageRequest);
         else
             individualMessagingService.sendAutomatedMessage(messageRequest);
     }
 
-    private void sendManualMessage(MessageRequest messageRequest) throws PhoneNumberNotAvailableOrIncorrectException {
+    private void sendManualMessage(MessageRequest messageRequest) throws PhoneNumberNotAvailableOrIncorrectException, GlificNotConfiguredException {
         MessageReceiver messageReceiver = messageRequest.getMessageReceiver();
         if(messageReceiver.getReceiverType() == ReceiverType.Group)
             groupMessagingService.sendManualMessage(messageRequest);
         else
             individualMessagingService.sendManualMessage(messageRequest);
+    }
+
+    public void saveRules(MessageRuleContract[] messageRuleContracts) {
+        for (MessageRuleContract messageRuleContract : messageRuleContracts) {
+            MessageRule messageRule = this.find(messageRuleContract.getUuid());
+            messageRule = MessageRuleContract.toModel(messageRuleContract, messageRule, entityTypeRetrieverService);
+            this.saveRule(messageRule);
         }
+    }
+
+    public FlowRequest createFlowRequest(StartFlowForContactRequest startFlowForContactRequest) {
+        MessageReceiver messageReceiver = messageReceiverService.saveReceiverIfRequired(startFlowForContactRequest.getReceiverType(),
+                Long.parseLong(startFlowForContactRequest.getReceiverId()));
+        return flowRequestQueueService.saveFlowRequest(messageReceiver, startFlowForContactRequest.getFlowId());
+    }
+
+    public void invokeStartFlowForContact(FlowRequest flowRequest)
+            throws GlificNotConfiguredException, PhoneNumberNotAvailableOrIncorrectException, GlificException {
+        individualMessagingService.invokeStartFlowForContact(flowRequest.getMessageReceiver(), flowRequest.getFlowId());
+    }
 }

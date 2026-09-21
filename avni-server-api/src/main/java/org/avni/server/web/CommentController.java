@@ -1,9 +1,14 @@
 package org.avni.server.web;
 
-import org.avni.server.dao.*;
+import org.springframework.transaction.annotation.Transactional;
+import org.avni.server.dao.CommentRepository;
+import org.avni.server.dao.CommentThreadRepository;
+import org.avni.server.dao.IndividualRepository;
+import org.avni.server.dao.SubjectTypeRepository;
+import org.avni.server.domain.Individual;
+import org.avni.server.domain.sync.SyncEntityName;
 import org.avni.server.domain.Comment;
 import org.avni.server.domain.CommentThread;
-import org.avni.server.domain.Individual;
 import org.avni.server.domain.SubjectType;
 import org.avni.server.service.CommentService;
 import org.avni.server.service.ScopeBasedSyncService;
@@ -17,29 +22,32 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.SliceImpl;
 import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.hateoas.Link;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
+import static org.avni.server.web.resourceProcessors.ResourceProcessor.addAuditFields;
+
 @RestController
 public class CommentController extends AbstractController<Comment> implements RestControllerResourceProcessor<Comment> {
 
-    private static org.slf4j.Logger logger = LoggerFactory.getLogger(CommentController.class);
+    private static final org.slf4j.Logger logger = LoggerFactory.getLogger(CommentController.class);
     private final CommentRepository commentRepository;
     private final IndividualRepository individualRepository;
     private final CommentService commentService;
     private final SubjectTypeRepository subjectTypeRepository;
     private final UserService userService;
     private final CommentThreadRepository commentThreadRepository;
-    private ScopeBasedSyncService<Comment> scopeBasedSyncService;
+    private final ScopeBasedSyncService<Comment> scopeBasedSyncService;
+    private final TxDataControllerHelper txDataControllerHelper;
 
     @Autowired
     public CommentController(CommentRepository commentRepository,
@@ -47,7 +55,9 @@ public class CommentController extends AbstractController<Comment> implements Re
                              CommentService commentService,
                              SubjectTypeRepository subjectTypeRepository,
                              UserService userService,
-                             CommentThreadRepository commentThreadRepository, ScopeBasedSyncService<Comment> scopeBasedSyncService) {
+                             CommentThreadRepository commentThreadRepository,
+                             ScopeBasedSyncService<Comment> scopeBasedSyncService,
+                             TxDataControllerHelper txDataControllerHelper) {
         this.commentRepository = commentRepository;
         this.individualRepository = individualRepository;
         this.commentService = commentService;
@@ -55,46 +65,69 @@ public class CommentController extends AbstractController<Comment> implements Re
         this.userService = userService;
         this.commentThreadRepository = commentThreadRepository;
         this.scopeBasedSyncService = scopeBasedSyncService;
+        this.txDataControllerHelper = txDataControllerHelper;
     }
 
     @GetMapping(value = "/web/comment")
-    @PreAuthorize(value = "hasAnyAuthority('admin','user')")
+    @PreAuthorize(value = "hasAnyAuthority('user')")
     @ResponseBody
-    @Transactional
+    @Transactional(readOnly = true)
     public List<Comment> getCommentsForSubject(@RequestParam(value = "commentThreadId") Long threadId) {
         return commentRepository.findByIsVoidedFalseAndCommentThreadIdOrderByLastModifiedDateTimeAscIdAsc(threadId);
     }
 
     @PostMapping(value = "/web/comment")
-    @PreAuthorize(value = "hasAnyAuthority('admin','user')")
+    @PreAuthorize(value = "hasAnyAuthority('user')")
     @ResponseBody
     @Transactional
-    public ResponseEntity<Comment> createComment(@RequestBody CommentContract commentContract) {
-        return ResponseEntity.ok(commentService.saveComment(commentContract));
+    public ResponseEntity<?> createComment(@RequestBody CommentContract commentContract) {
+        try {
+            Individual individual = individualRepository.findByUuid(commentContract.getSubjectUUID());
+            if (individual == null) {
+                return ResponseEntity.badRequest().build();
+            }
+            txDataControllerHelper.checkSubjectAccess(individual);
+            return ResponseEntity.ok(commentService.saveComment(commentContract));
+        } catch (TxDataControllerHelper.TxDataPartitionAccessDeniedException e) {
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            return ResponseEntity.status(403).body(e.getMessage());
+        }
     }
 
     @PutMapping(value = "/web/comment/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin','user')")
+    @PreAuthorize(value = "hasAnyAuthority('user')")
     @ResponseBody
     @Transactional
-    public ResponseEntity<Comment> editComment(@PathVariable Long id, @RequestBody CommentContract commentContract) {
-        Optional<Comment> comment = commentRepository.findById(id);
-        if (!comment.isPresent()) {
-            return ResponseEntity.notFound().build();
+    public ResponseEntity<?> editComment(@PathVariable Long id, @RequestBody CommentContract commentContract) {
+        try {
+            Optional<Comment> comment = commentRepository.findById(id);
+            if (!comment.isPresent()) {
+                return ResponseEntity.notFound().build();
+            }
+            txDataControllerHelper.checkSubjectAccess(comment.get().getSubject());
+            return ResponseEntity.ok(commentService.editComment(commentContract, comment.get()));
+        } catch (TxDataControllerHelper.TxDataPartitionAccessDeniedException e) {
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            return ResponseEntity.status(403).body(e.getMessage());
         }
-        return ResponseEntity.ok(commentService.editComment(commentContract, comment.get()));
     }
 
     @DeleteMapping(value = "/web/comment/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin','user')")
+    @PreAuthorize(value = "hasAnyAuthority('user')")
     @ResponseBody
     @Transactional
-    public ResponseEntity<Comment> deleteComment(@PathVariable Long id) {
-        Optional<Comment> comment = commentRepository.findById(id);
-        if (!comment.isPresent()) {
-            return ResponseEntity.notFound().build();
+    public ResponseEntity<?> deleteComment(@PathVariable Long id) {
+        try {
+            Optional<Comment> comment = commentRepository.findById(id);
+            if (!comment.isPresent()) {
+                return ResponseEntity.notFound().build();
+            }
+            txDataControllerHelper.checkSubjectAccess(comment.get().getSubject());
+            return ResponseEntity.ok(commentService.deleteComment(comment.get()));
+        } catch (TxDataControllerHelper.TxDataPartitionAccessDeniedException e) {
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            return ResponseEntity.status(403).body(e.getMessage());
         }
-        return ResponseEntity.ok(commentService.deleteComment(comment.get()));
     }
 
     @RequestMapping(value = "/comments", method = RequestMethod.POST)
@@ -115,7 +148,8 @@ public class CommentController extends AbstractController<Comment> implements Re
 
     @GetMapping(value = {"/comment/v2"})
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    public SlicedResources<Resource<Comment>> getCommentsByOperatingIndividualScopeAsSlice(
+    @Transactional(readOnly = true)
+    public SlicedResources<EntityModel<Comment>> getCommentsByOperatingIndividualScopeAsSlice(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
             @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
             @RequestParam(value = "subjectTypeUuid") String subjectTypeUuid,
@@ -124,12 +158,13 @@ public class CommentController extends AbstractController<Comment> implements Re
         if (subjectType == null) {
             return wrap(new SliceImpl<>(Collections.emptyList()));
         }
-        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocationAsSlice(commentRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncParameters.SyncEntityName.Comment));
+        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocationAsSlice(commentRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncEntityName.Comment));
     }
 
     @GetMapping(value = {"/comment"})
     @PreAuthorize(value = "hasAnyAuthority('user')")
-    public PagedResources<Resource<Comment>> getCommentsByOperatingIndividualScope(
+    @Transactional(readOnly = true)
+    public CollectionModel<EntityModel<Comment>> getCommentsByOperatingIndividualScope(
             @RequestParam("lastModifiedDateTime") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime lastModifiedDateTime,
             @RequestParam("now") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) DateTime now,
             @RequestParam(value = "subjectTypeUuid") String subjectTypeUuid,
@@ -138,18 +173,19 @@ public class CommentController extends AbstractController<Comment> implements Re
         if (subjectType == null) {
             return wrap(new PageImpl<>(Collections.emptyList()));
         }
-        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocation(commentRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncParameters.SyncEntityName.Comment));
+        return wrap(scopeBasedSyncService.getSyncResultsBySubjectTypeRegistrationLocation(commentRepository, userService.getCurrentUser(), lastModifiedDateTime, now, subjectType.getId(), pageable, subjectType, SyncEntityName.Comment));
     }
 
     @Override
-    public Resource<Comment> process(Resource<Comment> resource) {
+    public EntityModel<Comment> process(EntityModel<Comment> resource) {
         Comment comment = resource.getContent();
         CommentThread commentThread = comment.getCommentThread();
         resource.removeLinks();
-        resource.add(new Link(comment.getSubjectUUID(), "individualUUID"));
+        resource.add(Link.of(comment.getSubjectUUID(), "individualUUID"));
         if (commentThread != null) {
-            resource.add(new Link(commentThread.getUuid(), "commentThreadUUID"));
+            resource.add(Link.of(commentThread.getUuid(), "commentThreadUUID"));
         }
+        addAuditFields(comment, resource);
         return resource;
     }
 

@@ -1,13 +1,12 @@
 package org.avni.server.dao;
 
-import org.springframework.batch.core.BatchStatus;
-import org.springframework.batch.core.ExitStatus;
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.Id;
 
-import javax.persistence.Column;
-import javax.persistence.Entity;
-import javax.persistence.Id;
 import java.util.Date;
 
+// this should be renamed to the job for which this status is being tracked
 @Entity
 public class JobStatus {
     @Id
@@ -33,6 +32,7 @@ public class JobStatus {
     private String programUUID;
     private String encounterTypeUUID;
     private String reportType;
+    private long executionId;
 
     public Date getStartDate() {
         return startDate;
@@ -194,4 +194,11 @@ public class JobStatus {
         this.reportType = reportType;
     }
 
+    public long getExecutionId() {
+        return executionId;
+    }
+
+    public void setExecutionId(long executionId) {
+        this.executionId = executionId;
+    }
 }

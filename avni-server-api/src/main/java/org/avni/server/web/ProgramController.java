@@ -8,29 +8,36 @@ import org.avni.server.dao.ProgramRepository;
 import org.avni.server.domain.Individual;
 import org.avni.server.domain.OperationalProgram;
 import org.avni.server.domain.Program;
+import org.avni.server.domain.accessControl.PrivilegeType;
+import org.avni.server.domain.util.EntityUtil;
+import org.avni.server.framework.security.UserContextHolder;
 import org.avni.server.service.FormMappingParameterObject;
 import org.avni.server.service.FormMappingService;
 import org.avni.server.service.FormService;
 import org.avni.server.service.ProgramService;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.util.BadRequestError;
 import org.avni.server.util.ReactAdminUtil;
+import org.avni.server.web.contract.ProgramContract;
 import org.avni.server.web.request.ProgramRequest;
 import org.avni.server.web.request.webapp.ProgramContractWeb;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.domain.Pageable;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.util.CollectionUtils;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
+import org.springframework.transaction.annotation.Transactional;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @RestController
@@ -42,6 +49,7 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
     private final IndividualRepository individualRepository;
     private final FormService formService;
     private final FormMappingService formMappingService;
+    private final AccessControlService accessControlService;
 
     @Autowired
     public ProgramController(ProgramRepository programRepository,
@@ -49,27 +57,28 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
                              ProgramService programService,
                              IndividualRepository individualRepository,
                              FormService formService,
-                             FormMappingService formMappingService) {
+                             FormMappingService formMappingService, AccessControlService accessControlService) {
         this.programRepository = programRepository;
         this.operationalProgramRepository = operationalProgramRepository;
         this.programService = programService;
         this.individualRepository = individualRepository;
         this.formService = formService;
         this.formMappingService = formMappingService;
+        this.accessControlService = accessControlService;
         logger = LoggerFactory.getLogger(this.getClass());
     }
 
     @RequestMapping(value = "/programs", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
     public void save(@RequestBody List<ProgramRequest> programRequests) {
+        accessControlService.checkPrivilege(PrivilegeType.EditProgram);
         programRequests.forEach(programService::saveProgram);
     }
 
     @PostMapping(value = "/web/program")
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     @Transactional
     ResponseEntity saveProgramForWeb(@RequestBody ProgramContractWeb request) {
+        accessControlService.checkPrivilege(PrivilegeType.EditProgram);
         Program existingProgram =
                 programRepository.findByNameIgnoreCase(request.getName());
         OperationalProgram existingOperationalProgram =
@@ -77,14 +86,14 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
         if (existingProgram != null || existingOperationalProgram != null)
             return ResponseEntity.badRequest().body(ReactAdminUtil.generateJsonError(String.format("Program %s already exists", request.getName())));
         Program program = new Program();
-        program.assignUUIDIfRequired();
-        programService.updateAndSaveProgram(program, request);
+        program.assignUUID(request.getUuid());
+        program = programService.updateAndSaveProgram(program, request);
         OperationalProgram operationalProgram = new OperationalProgram();
         operationalProgram.assignUUIDIfRequired();
         operationalProgram.setName(request.getName());
         operationalProgram.setProgramSubjectLabel(request.getProgramSubjectLabel());
         operationalProgram.setProgram(program);
-        operationalProgramRepository.save(operationalProgram);
+        operationalProgram = operationalProgramRepository.save(operationalProgram);
 
         saveFormsAndMapping(request, program);
 
@@ -97,7 +106,6 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
                 FormType.ProgramEnrolment);
         formMappingService.saveFormMapping(
                 new FormMappingParameterObject(request.getSubjectTypeUuid(), program.getUuid(), null),
-                new FormMappingParameterObject(null, program.getUuid(), null),
                 enrolmentForm, request.isEnrolmentApprovalEnabled());
 
         Form exitForm = formService.getOrCreateForm(request.getProgramExitFormUuid(),
@@ -105,15 +113,14 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
                 FormType.ProgramExit);
         formMappingService.saveFormMapping(
                 new FormMappingParameterObject(request.getSubjectTypeUuid(), program.getUuid(), null),
-                new FormMappingParameterObject(null, program.getUuid(), null),
                 exitForm, request.isExitApprovalEnabled());
     }
 
     @PutMapping(value = "/web/program/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     @Transactional
     public ResponseEntity updateProgramForWeb(@RequestBody ProgramContractWeb request,
                                               @PathVariable("id") Long id) {
+        accessControlService.checkPrivilege(PrivilegeType.EditProgram);
         logger.info(String.format("Processing Operational Program update request: %s", request.toString()));
         if (request.getName().trim().equals(""))
             return ResponseEntity.badRequest().body(ReactAdminUtil.generateJsonError("Name can not be empty"));
@@ -137,9 +144,9 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
     }
 
     @DeleteMapping(value = "/web/program/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
     @Transactional
     public ResponseEntity voidProgram(@PathVariable("id") Long id) {
+        accessControlService.checkPrivilege(PrivilegeType.EditProgram);
         OperationalProgram operationalProgram = operationalProgramRepository.findOne(id);
         if (operationalProgram == null)
             return ResponseEntity.notFound().build();
@@ -147,8 +154,8 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
         if (program == null)
             return ResponseEntity.notFound().build();
 
-        operationalProgram.setName(ReactAdminUtil.getVoidedName(operationalProgram.getName(), operationalProgram.getId()));
-        program.setName(ReactAdminUtil.getVoidedName(program.getName(), program.getId()));
+        operationalProgram.setName(EntityUtil.getVoidedName(operationalProgram.getName(), operationalProgram.getId()));
+        program.setName(EntityUtil.getVoidedName(program.getName(), program.getId()));
         operationalProgram.setVoided(true);
         program.setVoided(true);
         operationalProgramRepository.save(operationalProgram);
@@ -160,16 +167,40 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
     }
 
     @GetMapping(value = "/web/program")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
-    public PagedResources<Resource<ProgramContractWeb>> getAll(Pageable pageable) {
+    public CollectionModel<EntityModel<ProgramContractWeb>> getAll(Pageable pageable) {
         return wrap(operationalProgramRepository
                 .findPageByIsVoidedFalse(pageable)
                 .map(ProgramContractWeb::fromOperationalProgram));
     }
 
+    @GetMapping(value = "/web/program/v2")
+    @Transactional(readOnly = true)
+    public List<ProgramContract> getAllPrograms(@RequestParam(required = false, name = "subjectType") List<String> subjectTypeUuids) {
+        List<Program> allPrograms;
+        if (CollectionUtils.isEmpty(subjectTypeUuids)) {
+            allPrograms = programRepository.findAllByIsVoidedFalseOrderByName();
+        } else {
+            allPrograms = formMappingService.getAllPrograms(subjectTypeUuids);
+        }
+
+        long organisationId = UserContextHolder.getUserContext().getOrganisationId();
+        Set<Long> operationalProgramIds = new HashSet<>(operationalProgramRepository.findProgramIdsByOrganisationId(organisationId));
+        allPrograms = allPrograms.stream()
+                .filter(p -> operationalProgramIds.contains(p.getId()))
+                .collect(Collectors.toList());
+
+        return allPrograms.stream().map(program -> {
+            ProgramContract programContract = new ProgramContract();
+            programContract.setName(program.getName());
+            programContract.setUuid(program.getUuid());
+            return programContract;
+        }).collect(Collectors.toList());
+    }
+
     @GetMapping(value = "web/eligiblePrograms")
-    @PreAuthorize(value = "hasAnyAuthority('user')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public List<ProgramContractWeb> getEligiblePrograms(@RequestParam String subjectUuid) {
         Individual individual = individualRepository.findByUuid(subjectUuid);
@@ -186,14 +217,14 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
     }
 
     @GetMapping(value = "/web/programs")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public List<OperationalProgram> getAllPrograms() {
         return operationalProgramRepository.findAll();
     }
 
     @GetMapping(value = "/web/program/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public ResponseEntity getOne(@PathVariable("id") Long id) {
         OperationalProgram operationalProgram = operationalProgramRepository.findOne(id);
@@ -202,5 +233,4 @@ public class ProgramController implements RestControllerResourceProcessor<Progra
         ProgramContractWeb programContractWeb = ProgramContractWeb.fromOperationalProgram(operationalProgram);
         return new ResponseEntity<>(programContractWeb, HttpStatus.OK);
     }
-
 }

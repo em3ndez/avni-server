@@ -1,0 +1,448 @@
+package org.avni.server.domain;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import jakarta.persistence.*;
+import jakarta.validation.constraints.NotNull;
+import org.avni.server.application.Format;
+import org.avni.server.application.Subject;
+import org.avni.server.application.projections.BaseProjection;
+import org.avni.server.framework.hibernate.DeclarativeRuleUserType;
+import org.avni.server.framework.hibernate.JSONObjectUserType;
+import org.hibernate.annotations.BatchSize;
+import org.hibernate.annotations.DynamicInsert;
+import org.hibernate.annotations.Type;
+import org.springframework.data.rest.core.config.Projection;
+
+import java.util.*;
+import java.util.stream.Collectors;
+
+@Entity
+@Table(name = "subject_type")
+@JsonIgnoreProperties({"operationalSubjectTypes"})
+@DynamicInsert
+@BatchSize(size = 100)
+public class SubjectType extends OrganisationAwareEntity implements NamedEntity {
+    @NotNull
+    @Column
+    private String name;
+
+    @OneToMany(fetch = FetchType.LAZY, mappedBy = "subjectType")
+    private Set<OperationalSubjectType> operationalSubjectTypes = new HashSet<>();
+
+    @OneToMany(fetch = FetchType.LAZY, mappedBy = "groupSubjectType")
+    private Set<GroupRole> groupRoles = new HashSet<>();
+
+    @Column
+    private boolean isGroup;
+
+    @Column
+    private boolean isHousehold;
+
+    @Column
+    @Enumerated(EnumType.STRING)
+    private Subject type;
+
+    private Boolean active;
+
+    @Column(name = "subject_summary_rule")
+    private String subjectSummaryRule;
+
+    private boolean allowEmptyLocation;
+
+    private boolean uniqueName;
+
+    private boolean allowProfilePicture;
+
+    @Column(name = "icon_file_s3_key")
+    private String iconFileS3Key;
+
+    //  Check keys in SubjectTypeSettingKeys
+    @Column
+    @Type(value = JSONObjectUserType.class)
+    private JsonObject settings;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "regex",
+                    column = @Column(name = "valid_first_name_regex")),
+            @AttributeOverride(name = "descriptionKey",
+                    column = @Column(name = "valid_first_name_description_key"))
+    })
+    private Format validFirstNameFormat;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "regex",
+                    column = @Column(name = "valid_middle_name_regex")),
+            @AttributeOverride(name = "descriptionKey",
+                    column = @Column(name = "valid_middle_name_description_key"))
+    })
+    private Format validMiddleNameFormat;
+
+    @Embedded
+    @AttributeOverrides({
+            @AttributeOverride(name = "regex",
+                    column = @Column(name = "valid_last_name_regex")),
+            @AttributeOverride(name = "descriptionKey",
+                    column = @Column(name = "valid_last_name_description_key"))
+    })
+    private Format validLastNameFormat;
+
+    @Column(name = "directly_assignable")
+    private boolean isDirectlyAssignable;
+
+    @Column(name = "should_sync_by_location")
+    private boolean shouldSyncByLocation;
+
+    @Column(name = "sync_registration_concept_1")
+    private String syncRegistrationConcept1;
+
+    @Column(name = "sync_registration_concept_2")
+    private String syncRegistrationConcept2;
+
+    @Column(name = "sync_registration_concept_1_usable")
+    private Boolean isSyncRegistrationConcept1Usable;
+
+    @Column(name = "sync_registration_concept_2_usable")
+    private Boolean isSyncRegistrationConcept2Usable;
+
+    @Column(name = "allow_middle_name")
+    private boolean allowMiddleName;
+
+    @Column(name = "last_name_optional")
+    private boolean lastNameOptional;
+
+    @Column
+    private String programEligibilityCheckRule;
+    @Column
+    private String memberAdditionEligibilityCheckRule;
+
+    @Column(name = "program_eligibility_check_declarative_rule")
+    @Type(value = DeclarativeRuleUserType.class)
+    private DeclarativeRule programEligibilityCheckDeclarativeRule;
+
+    private String nameHelpText;
+
+    public Set<GroupRole> getGroupRoles() {
+        return groupRoles;
+    }
+
+    public void setGroupRoles(Set<GroupRole> groupRoles) {
+        this.groupRoles = groupRoles;
+    }
+
+    public boolean isHousehold() {
+        return isHousehold;
+    }
+
+    public void setHousehold(boolean household) {
+        isHousehold = household;
+    }
+
+    public boolean isGroup() {
+        return isGroup;
+    }
+
+    public void setGroup(boolean group) {
+        isGroup = group;
+    }
+
+    public boolean isAttendanceEligible() {
+        return isGroup || isHousehold;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public Set<OperationalSubjectType> getOperationalSubjectTypes() {
+        return operationalSubjectTypes;
+    }
+
+    @JsonIgnore
+    public OperationalSubjectType getOperationalSubjectType() {
+        return operationalSubjectTypes.stream().findFirst().orElse(null);
+    }
+
+    public void setOperationalSubjectTypes(Set<OperationalSubjectType> operationalSubjectTypes) {
+        this.operationalSubjectTypes = operationalSubjectTypes;
+    }
+
+    public Subject getType() {
+        return type;
+    }
+
+    public void setType(Subject type) {
+        this.type = type;
+    }
+
+    public String getSubjectSummaryRule() {
+        return subjectSummaryRule;
+    }
+
+    public void setSubjectSummaryRule(String subjectSummaryRule) {
+        this.subjectSummaryRule = subjectSummaryRule;
+    }
+
+    @JsonIgnore
+    public String getOperationalSubjectTypeName() {
+        OperationalSubjectType operationalSubjectType = getOperationalSubjectType();
+        if (operationalSubjectType == null) return null;
+        return operationalSubjectType.getName();
+    }
+
+    // Used from projections
+    @JsonIgnore
+    public List<Long> getMemberSubjectIds() {
+        return isGroup() ? groupRoles.stream()
+                .filter(gr -> !gr.isVoided() && !gr.getMemberSubjectType().isVoided())
+                .map(gr -> gr.getMemberSubjectType().getId()).collect(Collectors.toList()) : Collections.emptyList();
+    }
+
+    public Boolean getActive() {
+        return active;
+    }
+
+    public void setActive(Boolean active) {
+        this.active = Optional.ofNullable(active).orElse(true);
+    }
+
+    public boolean isAllowEmptyLocation() {
+        return allowEmptyLocation;
+    }
+
+    public void setAllowEmptyLocation(boolean allowEmptyLocation) {
+        this.allowEmptyLocation = allowEmptyLocation;
+    }
+
+    public boolean isAllowProfilePicture() {
+        return allowProfilePicture;
+    }
+
+    public boolean isAllowMiddleName() {
+        return allowMiddleName;
+    }
+
+    public void setAllowMiddleName(boolean allowMiddleName) {
+        this.allowMiddleName = allowMiddleName;
+    }
+
+    public boolean isLastNameOptional() {
+        return lastNameOptional;
+    }
+
+    public void setLastNameOptional(boolean lastNameOptional) {
+        this.lastNameOptional = lastNameOptional;
+    }
+
+    public void setAllowProfilePicture(boolean allowProfilePicture) {
+        this.allowProfilePicture = allowProfilePicture;
+    }
+
+    public boolean isUniqueName() {
+        return uniqueName;
+    }
+
+    public void setUniqueName(boolean uniqueName) {
+        this.uniqueName = uniqueName;
+    }
+
+    public Format getValidFirstNameFormat() {
+        return validFirstNameFormat;
+    }
+
+    public void setValidFirstNameFormat(Format validFirstNameFormat) {
+        this.validFirstNameFormat = validFirstNameFormat;
+    }
+
+    public Format getValidMiddleNameFormat() {
+        return validMiddleNameFormat;
+    }
+
+    public void setValidMiddleNameFormat(Format validMiddleNameFormat) {
+        this.validMiddleNameFormat = validMiddleNameFormat;
+    }
+
+    public Format getValidLastNameFormat() {
+        return validLastNameFormat;
+    }
+
+    public void setValidLastNameFormat(Format validLastNameFormat) {
+        this.validLastNameFormat = validLastNameFormat;
+    }
+
+    public String getIconFileS3Key() {
+        return iconFileS3Key;
+    }
+
+    public void setIconFileS3Key(String iconFileS3Key) {
+        this.iconFileS3Key = iconFileS3Key;
+    }
+
+    public boolean isPerson() {
+        return type.equals(Subject.Person);
+    }
+
+    public boolean isDirectlyAssignable() {
+        return isDirectlyAssignable && !Subject.User.equals(this.type);
+    }
+
+    public void setDirectlyAssignable(boolean directlyAssignable) {
+        isDirectlyAssignable = directlyAssignable;
+    }
+
+    public boolean isShouldSyncByLocation() {
+        return shouldSyncByLocation && !Subject.User.equals(this.type);
+    }
+
+    public void setShouldSyncByLocation(boolean shouldSyncByLocation) {
+        this.shouldSyncByLocation = shouldSyncByLocation;
+    }
+
+    public String getSyncRegistrationConcept1() {
+        return syncRegistrationConcept1;
+    }
+
+    public void setSyncRegistrationConcept1(String syncRegistrationConcept1) {
+        this.syncRegistrationConcept1 = syncRegistrationConcept1;
+    }
+
+    public String getSyncRegistrationConcept2() {
+        return syncRegistrationConcept2;
+    }
+
+    public void setSyncRegistrationConcept2(String syncRegistrationConcept2) {
+        this.syncRegistrationConcept2 = syncRegistrationConcept2;
+    }
+
+    public Boolean isSyncRegistrationConcept1Usable() {
+        return isSyncRegistrationConcept1Usable;
+    }
+
+    public Boolean getSyncRegistrationConcept1Usable() {
+        return isSyncRegistrationConcept1Usable;
+    }
+
+    public void setSyncRegistrationConcept1Usable(Boolean syncRegistrationConcept1Usable) {
+        isSyncRegistrationConcept1Usable = syncRegistrationConcept1Usable;
+    }
+
+    public Boolean isSyncRegistrationConcept2Usable() {
+        return isSyncRegistrationConcept2Usable;
+    }
+
+    public Boolean getSyncRegistrationConcept2Usable() {
+        return isSyncRegistrationConcept2Usable;
+    }
+
+    public boolean isAnySyncRegistrationConceptUsable() {
+        return (isSyncRegistrationConcept1Usable != null && isSyncRegistrationConcept1Usable()) || (isSyncRegistrationConcept2Usable != null && isSyncRegistrationConcept2Usable());
+    }
+
+    public void setSyncRegistrationConcept2Usable(Boolean syncRegistrationConcept2Usable) {
+        isSyncRegistrationConcept2Usable = syncRegistrationConcept2Usable;
+    }
+
+    public String getNameHelpText() {
+        return nameHelpText;
+    }
+
+    public void setNameHelpText(String nameHelpText) {
+        this.nameHelpText = nameHelpText;
+    }
+
+    public String getProgramEligibilityCheckRule() {
+        return programEligibilityCheckRule;
+    }
+
+    public void setProgramEligibilityCheckRule(String programEligibilityCheckRule) {
+        this.programEligibilityCheckRule = programEligibilityCheckRule;
+    }
+
+    public DeclarativeRule getProgramEligibilityCheckDeclarativeRule() {
+        return programEligibilityCheckDeclarativeRule;
+    }
+
+    public String getMemberAdditionEligibilityCheckRule() {
+        return memberAdditionEligibilityCheckRule;
+    }
+
+    public void setMemberAdditionEligibilityCheckRule(String memberAdditionEligibilityCheckRule) {
+        this.memberAdditionEligibilityCheckRule = memberAdditionEligibilityCheckRule;
+    }
+
+    public void setProgramEligibilityCheckDeclarativeRule(DeclarativeRule programEligibilityCheckDeclarativeRule) {
+        this.programEligibilityCheckDeclarativeRule = programEligibilityCheckDeclarativeRule;
+    }
+
+    public JsonObject getSettings() {
+        return settings;
+    }
+
+    public void setSettings(JsonObject settings) {
+        this.settings = settings;
+    }
+
+    @Projection(name = "SubjectTypeProjection", types = {SubjectType.class})
+    public interface SubjectTypeProjection extends BaseProjection {
+        String getName();
+
+        String getOperationalSubjectTypeName();
+
+        boolean isGroup();
+
+        String getType();
+
+        boolean isAllowEmptyLocation();
+
+        boolean isAllowProfilePicture();
+
+        String getIconFileS3Key();
+
+        String getNameHelpText();
+
+        boolean isAllowMiddleName();
+
+        boolean isLastNameOptional();
+
+        Format getValidFirstNameFormat();
+        Format getValidMiddleNameFormat();
+        Format getValidLastNameFormat();
+
+        List<GroupRole.GroupRoleProjection> getGroupRoles();
+
+        JsonObject getSettings();
+
+        String getSyncRegistrationConcept1();
+
+        String getSyncRegistrationConcept2();
+
+        Boolean getSyncRegistrationConcept1Usable();
+
+        Boolean getSyncRegistrationConcept2Usable();
+    }
+
+    @Override
+    public String toString() {
+        return "{" +
+                "name='" + name + '\'' +
+                "uuid='" + this.getUuid() + '\'' +
+                '}';
+    }
+
+    @Column(name = "attendance_enabled")
+    private boolean attendanceEnabled;
+
+    public boolean isAttendanceEnabled() {
+        return attendanceEnabled;
+    }
+
+    public void setAttendanceEnabled(boolean attendanceEnabled) {
+        this.attendanceEnabled = attendanceEnabled;
+    }
+}

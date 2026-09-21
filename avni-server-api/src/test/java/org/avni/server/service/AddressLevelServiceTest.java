@@ -1,15 +1,20 @@
 package org.avni.server.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.Query;
 import org.avni.server.application.KeyType;
-import org.avni.server.application.projections.VirtualCatchmentProjection;
 import org.avni.server.dao.AddressLevelTypeRepository;
 import org.avni.server.dao.LocationRepository;
-import org.avni.server.domain.AddressLevelType;
-import org.avni.server.domain.Catchment;
-import org.avni.server.domain.SubjectType;
+import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.util.ObjectMapperSingleton;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.powermock.core.classloader.annotations.PrepareForTest;
 
 import java.util.Arrays;
 import java.util.Map;
@@ -20,7 +25,28 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@PrepareForTest({UserContextHolder.class})
 public class AddressLevelServiceTest {
+    @Mock
+    private EntityManager entityManager;
+
+    @Before
+    public void setUp() {
+        entityManager = Mockito.mock(EntityManager.class);
+        Query query = Mockito.mock(Query.class);
+        when(entityManager.createNativeQuery(Mockito.anyString())).thenReturn(query);
+        when(entityManager.createNativeQuery(Mockito.anyString()).executeUpdate()).thenReturn(1);
+        Organisation org = mock(Organisation.class);
+        UserContext userContext = new UserContext();
+        userContext.setOrganisation(org);
+        UserContextHolder.create(userContext);
+        when(org.getDbUser()).thenReturn("db-user");
+    }
+
+    @After
+    public void tearDown() {
+        UserContextHolder.clear();
+    }
 
     @Test
     public void shouldFetchDifferentAddressIdsWhenSubjectTypeChanges() throws JsonProcessingException {
@@ -28,28 +54,27 @@ public class AddressLevelServiceTest {
         AddressLevelTypeRepository addressLevelTypeRepository = mock(AddressLevelTypeRepository.class);
         OrganisationConfigService organisationConfigService = mock(OrganisationConfigService.class);
 
-        when(locationRepository.getVirtualCatchmentsForCatchmentIdAndLocationTypeId(1L, Arrays.asList(1L))).thenReturn(asList(
-                new VirtualCatchmentProjectImplementation(1L, 1L, 1L, 1L),
-                new VirtualCatchmentProjectImplementation(2L, 2L, 1L, 1L)
+        when(locationRepository.getCatchmentAddressesForCatchmentIdAndLocationTypeId(1L, Arrays.asList(1L))).thenReturn(asList(
+                new CatchmentAddressProjectionTestImplementation(1L,  1L, 1L, 1L),
+                new CatchmentAddressProjectionTestImplementation(2L,  2L, 1L, 1L)
         ));
 
-        when(locationRepository.getVirtualCatchmentsForCatchmentIdAndLocationTypeId(1L, Arrays.asList(2L))).thenReturn(asList(
-                new VirtualCatchmentProjectImplementation(3L, 3L, 1L, 2L),
-                new VirtualCatchmentProjectImplementation(4L, 4L, 1L, 2L)
+        when(locationRepository.getCatchmentAddressesForCatchmentIdAndLocationTypeId(1L, Arrays.asList(2L))).thenReturn(asList(
+                new CatchmentAddressProjectionTestImplementation( 3L, 3L, 1L, 2L),
+                new CatchmentAddressProjectionTestImplementation(4L, 4L, 1L, 2L)
         ));
 
         String orgConfig = "[{\"subjectTypeUUID\": \"first-subject-type-uuid\", \"locationTypeUUIDs\": [\"first-address-level-type-uuid\"]},{\"subjectTypeUUID\": \"second-subject-type-uuid\", \"locationTypeUUIDs\": [\"second-address-level-type-uuid\"]}]";
-        ObjectMapper objectMapper = new ObjectMapper();
         when(organisationConfigService.getSettingsByKey(KeyType.customRegistrationLocations.toString())).thenReturn(
-                asList(objectMapper.readValue(orgConfig, Map[].class))
+                asList(ObjectMapperSingleton.getObjectMapper().readValue(orgConfig, Map[].class))
         );
         when(addressLevelTypeRepository.findAllByUuidIn(singletonList("first-address-level-type-uuid")))
                 .thenReturn(singletonList(createAddressLevelType(1L)));
         when(addressLevelTypeRepository.findAllByUuidIn(singletonList("second-address-level-type-uuid")))
                 .thenReturn(singletonList(createAddressLevelType(2L)));
 
-        AddressLevelCache addressLevelCache = new AddressLevelCache(locationRepository);
-        AddressLevelService addressLevelService = new AddressLevelService(locationRepository, addressLevelTypeRepository, organisationConfigService, addressLevelCache);
+        AddressLevelCache addressLevelCache = new AddressLevelCache(entityManager, locationRepository);
+        AddressLevelService addressLevelService = new AddressLevelService(locationRepository, addressLevelTypeRepository, organisationConfigService, addressLevelCache, mock(LocationHierarchyService.class));
 
         Catchment catchment = new Catchment();
         catchment.setId(1L);
@@ -70,37 +95,4 @@ public class AddressLevelServiceTest {
         return addressLevelType;
     }
 
-    public static class VirtualCatchmentProjectImplementation implements VirtualCatchmentProjection {
-        private final Long id;
-        private final Long addressLevel_id;
-        private final Long catchment_id;
-        private final Long type_id;
-
-        public VirtualCatchmentProjectImplementation(Long id, Long addressLevel_id, Long catchment_id, Long type_id) {
-            this.id = id;
-            this.addressLevel_id = addressLevel_id;
-            this.catchment_id = catchment_id;
-            this.type_id = type_id;
-        }
-
-        @Override
-        public Long getId() {
-            return this.id;
-        }
-
-        @Override
-        public Long getAddresslevel_id() {
-            return this.addressLevel_id;
-        }
-
-        @Override
-        public Long getCatchment_id() {
-            return this.catchment_id;
-        }
-
-        @Override
-        public Long getType_id() {
-            return this.type_id;
-        }
-    }
 }

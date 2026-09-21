@@ -1,25 +1,27 @@
 package org.avni.server.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.joda.JodaModule;
+import org.springframework.transaction.annotation.Transactional;
+import org.avni.messaging.domain.EntityType;
+import org.avni.server.application.Form;
+import org.avni.server.application.RuleType;
 import org.avni.server.dao.*;
+import org.avni.server.dao.application.FormRepository;
+import org.avni.server.dao.individualRelationship.RuleFailureLogRepository;
 import org.avni.server.domain.*;
+import org.avni.server.framework.security.UserContextHolder;
+import org.avni.server.util.ObjectMapperSingleton;
 import org.avni.server.web.external.RuleServiceClient;
 import org.avni.server.web.request.EntityTypeContract;
+import org.avni.server.web.request.RuleRequest;
 import org.avni.server.web.request.rules.RulesContractWrapper.*;
+import org.avni.server.web.request.rules.constant.WorkFlowTypeEnum;
 import org.avni.server.web.request.rules.constructWrappers.*;
 import org.avni.server.web.request.rules.request.*;
 import org.avni.server.web.request.rules.response.*;
-import org.avni.server.application.Form;
-import org.avni.server.application.RuleType;
-import org.avni.server.dao.application.FormRepository;
-import org.avni.server.dao.individualRelationship.RuleFailureLogRepository;
-import org.avni.server.framework.security.UserContextHolder;
-import org.avni.server.util.ObjectMapperSingleton;
-import org.avni.server.web.request.RuleRequest;
-import org.avni.server.web.request.rules.constant.WorkFlowTypeEnum;
 import org.avni.server.web.request.rules.validateRules.RuleValidationService;
 import org.avni.server.web.validation.ValidationException;
+import org.joda.time.DateTime;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,18 +29,27 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-import javax.transaction.Transactional;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-
-import org.joda.time.DateTime;
-
-import java.util.*;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
 public class RuleService implements NonScopeAwareService {
+
+    public static final String SOURCE_WEB = "Web";
+    public static final String API_SUMMARY_RULE = "/api/summaryRule";
+    public static final String API_MESSAGING_RULE = "/api/messagingRule";
+    public static final String API_ENCOUNTER_ELIGIBILITY = "/api/encounterEligibility";
+    public static final String RULES_MESSAGE_EXECUTE = "Rules : messageExecute";
+    public static final String RULES_MESSAGE_SCHEDULE = "Rules : messageSchedule";
+
     private final Logger logger;
     private final RuleDependencyRepository ruleDependencyRepository;
     private final RuleRepository ruleRepository;
@@ -55,6 +66,8 @@ public class RuleService implements NonScopeAwareService {
     private final EntityRetrieverService entityRetrieverService;
     private final IndividualService individualService;
     private final RuleServiceEntityContractBuilder ruleServiceEntityContractBuilder;
+    private final UserRepository userRepository;
+    private final OrganisationRepository organisationRepository;
 
     @Autowired
     public RuleService(RuleDependencyRepository ruleDependencyRepository,
@@ -70,13 +83,15 @@ public class RuleService implements NonScopeAwareService {
                        RuleFailureLogRepository ruleFailureLogRepository,
                        ObservationService observationService,
                        IndividualContractBuilderServices contractBuilderServices,
-                       EntityRetrieverService entityRetrieverService, IndividualService individualService, RuleServiceEntityContractBuilder ruleServiceEntityContractBuilder) {
+                       EntityRetrieverService entityRetrieverService, IndividualService individualService, RuleServiceEntityContractBuilder ruleServiceEntityContractBuilder, UserRepository userRepository, OrganisationRepository organisationRepository) {
         this.ruleFailureLogRepository = ruleFailureLogRepository;
         this.observationService = observationService;
         this.contractBuilderServices = contractBuilderServices;
         this.entityRetrieverService = entityRetrieverService;
         this.individualService = individualService;
         this.ruleServiceEntityContractBuilder = ruleServiceEntityContractBuilder;
+        this.userRepository = userRepository;
+        this.organisationRepository = organisationRepository;
         logger = LoggerFactory.getLogger(this.getClass());
         this.ruleDependencyRepository = ruleDependencyRepository;
         this.ruleRepository = ruleRepository;
@@ -118,9 +133,8 @@ public class RuleService implements NonScopeAwareService {
     }
 
     @Transactional
-    public Rule createOrUpdate(RuleRequest ruleRequest) {
-        String ruleDependencyUUID = ruleRequest.getRuleDependencyUUID();
-        RuleDependency ruleDependency = ruleDependencyRepository.findByUuid(ruleDependencyUUID);
+    public Rule createOrUpdate(RuleRequest ruleRequest, Organisation organisation) {
+        RuleDependency ruleDependency = ruleDependencyRepository.findByOrganisationId(organisation.getId());
         String ruleUUID = ruleRequest.getUuid();
         Rule rule = ruleRepository.findByUuid(ruleUUID);
         if (rule == null) rule = new Rule();
@@ -139,9 +153,10 @@ public class RuleService implements NonScopeAwareService {
 
     @Transactional
     public void createOrUpdate(List<RuleRequest> rules) {
-        List<Rule> rulesFromDB = ruleRepository.findByOrganisationId(UserContextHolder.getUserContext().getOrganisation().getId());
+        Organisation organisation = UserContextHolder.getUserContext().getOrganisation();
+        List<Rule> rulesFromDB = ruleRepository.findByOrganisationId(organisation.getId());
         List<String> newRuleUUIDs = rules.stream()
-                .map(this::createOrUpdate)
+                .map(rule -> createOrUpdate(rule, organisation))
                 .map(Rule::getUuid)
                 .collect(Collectors.toList());
 
@@ -165,8 +180,8 @@ public class RuleService implements NonScopeAwareService {
         rule.setRuleType("Program Summary");
         ProgramEnrolmentContract programEnrolmentContract = ruleServiceEntityContractBuilder.toContract(programEnrolment);
         programEnrolmentContract.setRule(rule);
-        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(rule, "Web", "Rules : " + workFlowType, programEnrolment.getUuid());
-        ruleResponseEntity = createHttpHeaderAndSendRequest("/api/summaryRule", programEnrolmentContract, ruleFailureLog, RuleResponseEntity.class);
+        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(rule, SOURCE_WEB, "Rules : " + workFlowType, programEnrolment.getUuid());
+        ruleResponseEntity = createHttpHeaderAndSendRequest(API_SUMMARY_RULE, programEnrolmentContract, ruleFailureLog, RuleResponseEntity.class);
         setObservationsOnResponse(workFlowType, ruleResponseEntity);
         return ruleResponseEntity;
     }
@@ -186,8 +201,8 @@ public class RuleService implements NonScopeAwareService {
         rule.setRuleType("Subject Summary");
         IndividualContract individualContract = ruleServiceEntityContractBuilder.toContract(individual);
         individualContract.setRule(rule);
-        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(rule, "Web", "Rules : " + workFlowType, individual.getUuid());
-        RuleResponseEntity ruleResponseEntity = createHttpHeaderAndSendRequest("/api/summaryRule", individualContract, ruleFailureLog, RuleResponseEntity.class);
+        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(rule, SOURCE_WEB, "Rules : " + workFlowType, individual.getUuid());
+        RuleResponseEntity ruleResponseEntity = createHttpHeaderAndSendRequest(API_SUMMARY_RULE, individualContract, ruleFailureLog, RuleResponseEntity.class);
         setObservationsOnResponse(workFlowType, ruleResponseEntity);
         return ruleResponseEntity;
     }
@@ -202,7 +217,7 @@ public class RuleService implements NonScopeAwareService {
         );
         List<EntityTypeContract> entityTypeContracts = encounterTypes.stream().map(EntityTypeContract::fromEncounterType).collect(Collectors.toList());
         EntityEligibilityRuleRequest ruleRequest = new EntityEligibilityRuleRequest(individualContract, entityTypeContracts, RuleEntityType.EncounterType.name());
-        return createHttpHeaderAndSendRequest("/api/encounterEligibility", ruleRequest, null, EligibilityRuleResponseEntity.class);
+        return createHttpHeaderAndSendRequest(API_ENCOUNTER_ELIGIBILITY, ruleRequest, null, EligibilityRuleResponseEntity.class);
     }
 
     public EligibilityRuleResponseEntity executeProgramEligibilityCheckRule(Individual individual, List<Program> programs) throws RuleExecutionException {
@@ -210,30 +225,53 @@ public class RuleService implements NonScopeAwareService {
         IndividualContract individualContract = ruleServiceEntityContractBuilder.toContract(individual);
         List<EntityTypeContract> entityTypeContracts = programs.stream().map(EntityTypeContract::fromProgram).collect(Collectors.toList());
         EntityEligibilityRuleRequest ruleRequest = new EntityEligibilityRuleRequest(individualContract, entityTypeContracts, RuleEntityType.Program.name());
-        return createHttpHeaderAndSendRequest("/api/encounterEligibility", ruleRequest, null, EligibilityRuleResponseEntity.class);
+        return createHttpHeaderAndSendRequest(API_ENCOUNTER_ELIGIBILITY, ruleRequest, null, EligibilityRuleResponseEntity.class);
     }
 
     public ScheduleRuleResponseEntity executeScheduleRule(String entityType, Long entityId, String scheduleRule) throws RuleExecutionException {
+        String rulesMessage = RULES_MESSAGE_SCHEDULE;
+        Class<ScheduleRuleResponseEntity> responseType = ScheduleRuleResponseEntity.class;
         CHSEntity entity = entityRetrieverService.getEntity(entityType, entityId);
         RuleServerEntityContract contract = ruleServiceEntityContractBuilder.toContract(entityType, entity);
-        MessageRequestEntity ruleRequest = new MessageRequestEntity(contract, scheduleRule, entityType);
-        BaseRuleRequest baseRuleRequest = new BaseRuleRequest();
-        baseRuleRequest.setRuleType(entityType);
-        baseRuleRequest.setFormUuid(entity.getUuid());
-        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(baseRuleRequest, "Web", "Rules : messageSchedule", String.valueOf(entity.getUuid()));
-        return createHttpHeaderAndSendRequest("/api/messagingRule", ruleRequest, ruleFailureLog, ScheduleRuleResponseEntity.class);
+        return (ScheduleRuleResponseEntity) getBaseRuleResponseEntity(entityType, scheduleRule, rulesMessage, responseType, contract, entity.getUuid());
     }
 
-    public String[] executeMessageRule(String entityType, Long entityId, String messageRule) throws RuleExecutionException {
+    public MessageRuleResponseEntity executeMessageRule(String entityType, Long entityId, String messageRule) throws RuleExecutionException {
+        String rulesMessage = RULES_MESSAGE_EXECUTE;
+        Class<MessageRuleResponseEntity> responseType = MessageRuleResponseEntity.class;
         CHSEntity entity = entityRetrieverService.getEntity(entityType, entityId);
         RuleServerEntityContract contract = ruleServiceEntityContractBuilder.toContract(entityType, entity);
-        MessageRequestEntity ruleRequest = new MessageRequestEntity(contract, messageRule, entityType);
+        return (MessageRuleResponseEntity) getBaseRuleResponseEntity(entityType, messageRule, rulesMessage, responseType, contract, entity.getUuid());
+    }
+
+    public ScheduleRuleResponseEntity executeScheduleRuleForEntityTypeUser(Long entityId, String scheduleRule) throws RuleExecutionException {
+        String entityType = EntityType.User.name();
+        String rulesMessage = RULES_MESSAGE_SCHEDULE;
+        Class<ScheduleRuleResponseEntity> responseType = ScheduleRuleResponseEntity.class;
+        User entity = userRepository.getOne(entityId);
+        Organisation organisation = organisationRepository.findOne(entity.getOrganisationId());
+        RuleServerEntityContract contract = UserContract.fromUser(entity, organisation);
+        return (ScheduleRuleResponseEntity) getBaseRuleResponseEntity(entityType, scheduleRule, rulesMessage, responseType, contract, entity.getUuid());
+    }
+
+    public MessageRuleResponseEntity executeMessageRuleForEntityTypeUser(Long entityId, String messageRule) throws RuleExecutionException {
+        String entityType = EntityType.User.name();
+        String rulesMessage = RULES_MESSAGE_EXECUTE;
+        Class<MessageRuleResponseEntity> responseType = MessageRuleResponseEntity.class;
+        User entity = userRepository.getOne(entityId);
+        Organisation organisation = organisationRepository.findOne(entity.getOrganisationId());
+        RuleServerEntityContract contract = UserContract.fromUser(entity, organisation);
+        return (MessageRuleResponseEntity) getBaseRuleResponseEntity(entityType, messageRule, rulesMessage, responseType, contract, entity.getUuid());
+    }
+
+    private BaseRuleResponseEntity getBaseRuleResponseEntity(String entityType, String rule, String rulesMessage, Class<? extends BaseRuleResponseEntity> responseType, RuleServerEntityContract contract,
+                                                             String entityUuid) throws RuleExecutionException {
+        MessageRequestEntity ruleRequest = new MessageRequestEntity(contract, rule, entityType);
         BaseRuleRequest baseRuleRequest = new BaseRuleRequest();
         baseRuleRequest.setRuleType(entityType);
-        baseRuleRequest.setFormUuid(entity.getUuid());
-        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(baseRuleRequest, "Web", "Rules : messageExecute", String.valueOf(entityId));
-        MessageRuleResponseEntity messageRuleResponseEntity = createHttpHeaderAndSendRequest("/api/messagingRule", ruleRequest, ruleFailureLog, MessageRuleResponseEntity.class);
-        return messageRuleResponseEntity.getParameters();
+        baseRuleRequest.setFormUuid(entityUuid);
+        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(baseRuleRequest, SOURCE_WEB, rulesMessage, String.valueOf(entityUuid));
+        return createHttpHeaderAndSendRequest(API_MESSAGING_RULE, ruleRequest, ruleFailureLog, responseType);
     }
 
     public RuleResponseEntity executeServerSideRules(RequestEntityWrapper requestEntityWrapper) throws RuleExecutionException {
@@ -246,6 +284,9 @@ public class RuleService implements NonScopeAwareService {
         Object entity = null;
         String entityUuid = null;
         String workFlowType = requestEntityWrapper.getRule().getWorkFlowType();
+        if(StringUtils.isEmpty(rule.getRuleType())) {
+            rule.setRuleType(workFlowType);
+        }
         switch (WorkFlowTypeEnum.findByValue(workFlowType.toLowerCase())) {
             case PROGRAM_ENROLMENT:
                 ProgramEnrolmentRequestEntity programEnrolmentRequestEntity = requestEntityWrapper.getProgramEnrolmentRequestEntity();
@@ -282,7 +323,7 @@ public class RuleService implements NonScopeAwareService {
                 break;
         }
 
-        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(rule, "Web", "Rules : " + workFlowType, entityUuid);
+        RuleFailureLog ruleFailureLog = ruleValidationService.generateRuleFailureLog(rule, SOURCE_WEB, "Rules : " + workFlowType, entityUuid);
         RuleResponseEntity ruleResponseEntity = createHttpHeaderAndSendRequest("/api/rules", entity, ruleFailureLog, RuleResponseEntity.class);
         setObservationsOnResponse(workFlowType, ruleResponseEntity);
         return ruleResponseEntity;
@@ -325,15 +366,14 @@ public class RuleService implements NonScopeAwareService {
     private <R extends BaseRuleResponseEntity> R createHttpHeaderAndSendRequest(String url, Object contractObject, RuleFailureLog ruleFailureLog, Class<R> responseType) throws RuleExecutionException {
         try {
             ObjectMapper mapper = ObjectMapperSingleton.getObjectMapper();
-            mapper.registerModule(new JodaModule());
-            String ruleResponse = restClient.post(url, contractObject);
-            R ruleResponseEntity = mapper.readValue(ruleResponse, responseType);
+            R ruleResponseEntity = (R) restClient.post(url, contractObject, responseType);
             if (ruleResponseEntity.getStatus().equals("failure")) {
                 RuleError ruleError = ruleResponseEntity.getError();
                 saveRuleError(ruleFailureLog, ruleError.getMessage(), ruleError.getStack());
             }
             return ruleResponseEntity;
         } catch (Exception e) {
+            logger.error("Error while executing rule", e);
             saveRuleError(ruleFailureLog, e.getMessage(), getStackTrace(e));
             RuleError ruleError = new RuleError();
             ruleError.setMessage(e.getMessage());
@@ -365,6 +405,31 @@ public class RuleService implements NonScopeAwareService {
                 throw new ValidationException(String.format("%s with uuid: %s not found for rule with uuid: %s",
                         ruleRequest.getEntityType(), entityUUID, ruleRequest.getUuid()));
             }
+        }
+    }
+
+    public void createUpdateGlobalRule(String ruleCode) {
+        RuleDependency ruleDependency = ruleDependencyRepository.findByUuid(RuleDependency.GLOBAL_RULE_UUID);
+        if (ruleDependency == null) ruleDependency = new RuleDependency();
+        ruleDependency.setCode(ruleCode);
+        ruleDependency.setChecksum(generateChecksum(ruleCode));
+        ruleDependency.setUuid(RuleDependency.GLOBAL_RULE_UUID);
+        ruleDependencyRepository.save(ruleDependency);
+    }
+
+    private static String generateChecksum(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(input.getBytes());
+            StringBuilder hexString = new StringBuilder();
+            for (byte b : hash) {
+                String hex = Integer.toHexString(0xff & b);
+                if (hex.length() == 1) hexString.append('0');
+                hexString.append(hex);
+            }
+            return hexString.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
         }
     }
 }

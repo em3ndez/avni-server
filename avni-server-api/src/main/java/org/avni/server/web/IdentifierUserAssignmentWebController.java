@@ -1,101 +1,138 @@
 package org.avni.server.web;
 
-import org.springframework.data.domain.Page;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.IdentifierSourceRepository;
 import org.avni.server.dao.IdentifierUserAssignmentRepository;
 import org.avni.server.dao.UserRepository;
 import org.avni.server.domain.IdentifierUserAssignment;
+import org.avni.server.domain.ValidationException;
+import org.avni.server.domain.accessControl.PrivilegeType;
+import org.avni.server.domain.identifier.IdentifierOverlappingException;
+import org.avni.server.service.accessControl.AccessControlService;
+import org.avni.server.service.identifier.IdentifierUserAssignmentService;
 import org.avni.server.util.ReactAdminUtil;
+import org.avni.server.util.WebResponseUtil;
 import org.avni.server.web.request.webapp.IdentifierUserAssignmentContractWeb;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
-import org.springframework.hateoas.PagedResources;
-import org.springframework.hateoas.Resource;
+import org.springframework.data.domain.Sort;
+import org.springframework.hateoas.CollectionModel;
+import org.springframework.hateoas.EntityModel;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
-import javax.transaction.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 public class IdentifierUserAssignmentWebController extends AbstractController<IdentifierUserAssignment> implements RestControllerResourceProcessor<IdentifierUserAssignmentContractWeb> {
-    private IdentifierUserAssignmentRepository identifierUserAssignmentRepository;
-    private UserRepository userRepository;
-    private IdentifierSourceRepository identifierSourceRepository;
+    private final IdentifierUserAssignmentRepository identifierUserAssignmentRepository;
+    private final UserRepository userRepository;
+    private final IdentifierSourceRepository identifierSourceRepository;
+    private final AccessControlService accessControlService;
+    private final IdentifierUserAssignmentService identifierUserAssignmentService;
+    private final static Logger logger = LoggerFactory.getLogger(IdentifierUserAssignmentWebController.class);;
 
     @Autowired
-    public IdentifierUserAssignmentWebController(IdentifierUserAssignmentRepository identifierUserAssignmentRepository, UserRepository userRepository, IdentifierSourceRepository identifierSourceRepository) {
+    public IdentifierUserAssignmentWebController(IdentifierUserAssignmentRepository identifierUserAssignmentRepository, UserRepository userRepository, IdentifierSourceRepository identifierSourceRepository, AccessControlService accessControlService, IdentifierUserAssignmentService identifierUserAssignmentService) {
         this.identifierUserAssignmentRepository = identifierUserAssignmentRepository;
         this.userRepository = userRepository;
         this.identifierSourceRepository = identifierSourceRepository;
+        this.accessControlService = accessControlService;
+        this.identifierUserAssignmentService = identifierUserAssignmentService;
     }
 
     @GetMapping(value = "/web/identifierUserAssignment")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
-    public PagedResources<Resource<IdentifierUserAssignmentContractWeb>> getAll(Pageable pageable) {
-        Page<IdentifierUserAssignment> nonVoided = identifierUserAssignmentRepository.findPageByIsVoidedFalse(pageable);
-        Page<IdentifierUserAssignmentContractWeb> response = nonVoided.map(identifierUserAssignment -> IdentifierUserAssignmentContractWeb.fromIdentifierUserAssignment(identifierUserAssignment));
+    public CollectionModel<EntityModel<IdentifierUserAssignmentContractWeb>> getAll(Pageable pageable) {
+        Sort mappedSort = mapSort(pageable.getSort());
+        PageRequest pageRequest = PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), mappedSort);
+        Page<IdentifierUserAssignment> nonVoided = identifierUserAssignmentRepository.findPageByIsVoidedFalse(pageRequest);
+        Page<IdentifierUserAssignmentContractWeb> response = nonVoided.map(IdentifierUserAssignmentContractWeb::fromIdentifierUserAssignment);
         return wrap(response);
     }
 
+    private Sort mapSort(Sort sort) {
+        return Sort.by(sort.stream().map(order -> {
+            String property = order.getProperty();
+            if ("userName".equals(property)) {
+                property = "assignedTo.name";
+            } else if ("name".equals(property)) {
+                property = "identifierSource.name";
+            }
+            return new Sort.Order(order.getDirection(), property);
+        }).toList());
+    }
+
     @GetMapping(value = "/web/identifierUserAssignment/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin','organisation_admin')")
+    @Transactional(readOnly = true)
     @ResponseBody
     public ResponseEntity getOne(@PathVariable("id") Long id) {
         IdentifierUserAssignment identifierUserAssignment = identifierUserAssignmentRepository.findOne(id);
-        if (identifierUserAssignment.isVoided())
+        if (identifierUserAssignment == null || identifierUserAssignment.isVoided())
             return ResponseEntity.notFound().build();
         return new ResponseEntity<>(IdentifierUserAssignmentContractWeb.fromIdentifierUserAssignment(identifierUserAssignment), HttpStatus.OK);
     }
 
     @PostMapping(value = "/web/identifierUserAssignment")
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     @Transactional
-    ResponseEntity saveProgramForWeb(@RequestBody IdentifierUserAssignmentContractWeb request) {
-        IdentifierUserAssignment identifierUserAssignment = new IdentifierUserAssignment();
+    public ResponseEntity saveIdentifierAssignment(@RequestBody IdentifierUserAssignmentContractWeb request) {
+        accessControlService.checkPrivilege(PrivilegeType.EditIdentifierUserAssignment);
+        IdentifierUserAssignment identifierUserAssignment = getIdentifierUserAssignment(request);
+
         identifierUserAssignment.assignUUID();
-        identifierUserAssignment.setAssignedTo(request.getUserId() == null ? null : userRepository.findOne(request.getUserId()));
-        identifierUserAssignment.setIdentifierSource(request.getIdentifierSourceId() == null ? null : identifierSourceRepository.findOne(request.getIdentifierSourceId()));
-        identifierUserAssignment.setIdentifierStart(request.getIdentifierStart());
-        identifierUserAssignment.setIdentifierEnd(request.getIdentifierEnd());
         identifierUserAssignment.setVoided(false);
-        identifierUserAssignmentRepository.save(identifierUserAssignment);
+        try {
+            identifierUserAssignmentService.save(identifierUserAssignment);
+        } catch (IdentifierOverlappingException | ValidationException e) {
+            return WebResponseUtil.createBadRequestResponse(e, logger);
+        }
         return ResponseEntity.ok(IdentifierUserAssignmentContractWeb.fromIdentifierUserAssignment(identifierUserAssignment));
     }
 
     @PutMapping(value = "/web/identifierUserAssignment/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin')")
     @Transactional
-    public ResponseEntity updateProgramForWeb(@RequestBody IdentifierUserAssignmentContractWeb request,
-                                              @PathVariable("id") Long id) {
-        IdentifierUserAssignment identifierUserAssignment = identifierUserAssignmentRepository.findOne(id);
-        if (identifierUserAssignment == null)
+    public ResponseEntity updateIdAssignment(@RequestBody IdentifierUserAssignmentContractWeb request,
+                                             @PathVariable("id") Long id) {
+        accessControlService.checkPrivilege(PrivilegeType.EditIdentifierUserAssignment);
+        IdentifierUserAssignment existingIdentifierUserAssignment = identifierUserAssignmentRepository.findOne(id);
+        if (existingIdentifierUserAssignment == null)
             return ResponseEntity.badRequest()
                     .body(ReactAdminUtil.generateJsonError(String.format("Identifier source with id '%d' not found", id)));
 
+        IdentifierUserAssignment identifierUserAssignment = getIdentifierUserAssignment(request);
+        identifierUserAssignment.setVoided(request.isVoided());
+        IdentifierUserAssignment updatedIdentifierUserAssignment;
+        try {
+            updatedIdentifierUserAssignment = identifierUserAssignmentService.update(existingIdentifierUserAssignment, identifierUserAssignment);
+        } catch (IdentifierOverlappingException | ValidationException e) {
+            return WebResponseUtil.createBadRequestResponse(e, logger);
+        }
+        return ResponseEntity.ok(IdentifierUserAssignmentContractWeb.fromIdentifierUserAssignment(updatedIdentifierUserAssignment));
+    }
+
+    @DeleteMapping(value = "/web/identifierUserAssignment/{id}")
+    @Transactional
+    public ResponseEntity voidIdentifierUserAssignment(@PathVariable("id") Long id) {
+        accessControlService.checkPrivilege(PrivilegeType.EditIdentifierUserAssignment);
+        IdentifierUserAssignment identifierUserAssignment = identifierUserAssignmentRepository.findOne(id);
+        if (identifierUserAssignment == null)
+            return ResponseEntity.notFound().build();
+
+        identifierUserAssignment.setVoided(true);
+        identifierUserAssignmentRepository.save(identifierUserAssignment);
+        return ResponseEntity.ok(null);
+    }
+
+    private IdentifierUserAssignment getIdentifierUserAssignment(IdentifierUserAssignmentContractWeb request) {
+        IdentifierUserAssignment identifierUserAssignment = new IdentifierUserAssignment();
         identifierUserAssignment.setAssignedTo(request.getUserId() == null ? null : userRepository.findOne(request.getUserId()));
         identifierUserAssignment.setIdentifierSource(request.getIdentifierSourceId() == null ? null : identifierSourceRepository.findOne(request.getIdentifierSourceId()));
         identifierUserAssignment.setIdentifierStart(request.getIdentifierStart());
         identifierUserAssignment.setIdentifierEnd(request.getIdentifierEnd());
-        identifierUserAssignment.setVoided(request.isVoided());
-        identifierUserAssignmentRepository.save(identifierUserAssignment);
-        return ResponseEntity.ok(IdentifierUserAssignmentContractWeb.fromIdentifierUserAssignment(identifierUserAssignment));
+        return identifierUserAssignment;
     }
-
-    @DeleteMapping(value = "/web/identifierUserAssignment/{id}")
-    @PreAuthorize(value = "hasAnyAuthority('admin', 'organisation_admin')")
-    @Transactional
-    public ResponseEntity voidProgram(@PathVariable("id") Long id) {
-        IdentifierUserAssignment identifierSource = identifierUserAssignmentRepository.findOne(id);
-        if (identifierSource == null)
-            return ResponseEntity.notFound().build();
-
-        identifierSource.setVoided(true);
-        identifierUserAssignmentRepository.save(identifierSource);
-        return ResponseEntity.ok(null);
-    }
-
 }

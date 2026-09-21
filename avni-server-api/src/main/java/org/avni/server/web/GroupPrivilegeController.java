@@ -1,17 +1,19 @@
 package org.avni.server.web;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.avni.server.dao.*;
 import org.avni.server.domain.Group;
+import org.avni.server.domain.SubjectType;
 import org.avni.server.domain.accessControl.GroupPrivilege;
 import org.avni.server.domain.accessControl.Privilege;
-import org.avni.server.domain.SubjectType;
+import org.avni.server.domain.accessControl.PrivilegeType;
+import org.avni.server.service.accessControl.AccessControlService;
 import org.avni.server.service.accessControl.GroupPrivilegeService;
 import org.avni.server.web.request.GroupPrivilegeContract;
+import org.avni.server.web.request.GroupPrivilegeWebRequest;
 import org.springframework.http.ResponseEntity;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import javax.transaction.Transactional;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -19,16 +21,17 @@ import java.util.stream.Collectors;
 
 @RestController
 public class GroupPrivilegeController extends AbstractController<GroupPrivilege> implements RestControllerResourceProcessor<GroupPrivilege> {
-    private GroupPrivilegeRepository groupPrivilegeRepository;
-    private GroupRepository groupRepository;
-    private PrivilegeRepository privilegeRepository;
-    private SubjectTypeRepository subjectTypeRepository;
-    private ProgramRepository programRepository;
-    private EncounterTypeRepository encounterTypeRepository;
-    private ChecklistDetailRepository checklistDetailRepository;
-    private GroupPrivilegeService groupPrivilegeService;
+    private final GroupPrivilegeRepository groupPrivilegeRepository;
+    private final GroupRepository groupRepository;
+    private final PrivilegeRepository privilegeRepository;
+    private final SubjectTypeRepository subjectTypeRepository;
+    private final ProgramRepository programRepository;
+    private final EncounterTypeRepository encounterTypeRepository;
+    private final ChecklistDetailRepository checklistDetailRepository;
+    private final GroupPrivilegeService groupPrivilegeService;
+    private final AccessControlService accessControlService;
 
-    public GroupPrivilegeController(GroupPrivilegeRepository groupPrivilegeRepository, GroupRepository groupRepository, PrivilegeRepository privilegeRepository, SubjectTypeRepository subjectTypeRepository, ProgramRepository programRepository, EncounterTypeRepository encounterTypeRepository, ChecklistDetailRepository checklistDetailRepository, GroupPrivilegeService groupPrivilegeService) {
+    public GroupPrivilegeController(GroupPrivilegeRepository groupPrivilegeRepository, GroupRepository groupRepository, PrivilegeRepository privilegeRepository, SubjectTypeRepository subjectTypeRepository, ProgramRepository programRepository, EncounterTypeRepository encounterTypeRepository, ChecklistDetailRepository checklistDetailRepository, GroupPrivilegeService groupPrivilegeService, AccessControlService accessControlService) {
         this.groupPrivilegeRepository = groupPrivilegeRepository;
         this.groupRepository = groupRepository;
         this.privilegeRepository = privilegeRepository;
@@ -37,14 +40,15 @@ public class GroupPrivilegeController extends AbstractController<GroupPrivilege>
         this.encounterTypeRepository = encounterTypeRepository;
         this.checklistDetailRepository = checklistDetailRepository;
         this.groupPrivilegeService = groupPrivilegeService;
+        this.accessControlService = accessControlService;
     }
 
     @RequestMapping(value = "/groups/{id}/privileges", method = RequestMethod.GET)
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin', 'admin')")
+    @Transactional(readOnly = true)
     public List<GroupPrivilegeContract> getById(@PathVariable("id") Long id) {
-        List<GroupPrivilege> allPrivileges = groupPrivilegeService.getAllGroupPrivileges(id);
-        List<GroupPrivilege> groupPrivileges = groupPrivilegeRepository.findByGroup_Id(id);
-        groupPrivileges.addAll(allPrivileges);
+        List<GroupPrivilege> allPossibleGroupPrivileges = groupPrivilegeService.getAllGroupPrivileges(id);
+        List<GroupPrivilege> groupPrivileges = groupPrivilegeRepository.findByGroup_IdAndImplVersion(id, GroupPrivilege.IMPL_VERSION);
+        groupPrivileges.addAll(allPossibleGroupPrivileges);
         return groupPrivileges.stream()
                 .map(GroupPrivilegeContract::fromEntity)
                 .distinct()
@@ -53,39 +57,42 @@ public class GroupPrivilegeController extends AbstractController<GroupPrivilege>
 
     @RequestMapping(value = "/groupPrivilege", method = RequestMethod.POST)
     @Transactional
-    @PreAuthorize(value = "hasAnyAuthority('organisation_admin', 'admin')")
-    public ResponseEntity addOrUpdateGroupPrivileges(@RequestBody List<GroupPrivilegeContract> request) {
+    public ResponseEntity addOrUpdateGroupPrivileges(@RequestBody List<GroupPrivilegeWebRequest> request) {
+        accessControlService.checkPrivilege(PrivilegeType.EditUserGroup);
         List<GroupPrivilege> privilegesToBeAddedOrUpdated = new ArrayList<>();
 
-        for (GroupPrivilegeContract groupPrivilege : request) {
-            GroupPrivilege newGroupPrivilege = groupPrivilegeRepository.findByUuid(groupPrivilege.getUuid());
-            if (newGroupPrivilege != null) {
-                newGroupPrivilege.setAllow(groupPrivilege.isAllow());
-                privilegesToBeAddedOrUpdated.add(newGroupPrivilege);
+        for (GroupPrivilegeWebRequest groupPrivilegeRequest : request) {
+            //continue to rely on uuid here since privilege list on webapp will either be new records or valid impl_version existing record for the same org
+            GroupPrivilege groupPrivilege = groupPrivilegeRepository.findByUuid(groupPrivilegeRequest.getUuid());
+            if (groupPrivilege != null) {
+                groupPrivilege.setAllow(groupPrivilegeRequest.isAllow());
+                privilegesToBeAddedOrUpdated.add(groupPrivilege);
             } else {
-                newGroupPrivilege = new GroupPrivilege();
-                Optional<Privilege> optionalPrivilege = privilegeRepository.findById(groupPrivilege.getPrivilegeId());
-                Group group = groupRepository.findOne(groupPrivilege.getGroupId());
-                SubjectType subjectType = subjectTypeRepository.findOne(groupPrivilege.getSubjectTypeId());
-
-                if (!optionalPrivilege.isPresent() || group == null || subjectType == null) {
-                    return ResponseEntity.badRequest().body(String.format("Invalid privilege id %d or group id %d or subject type %s", groupPrivilege.getPrivilegeId(), groupPrivilege.getGroupId(), groupPrivilege.getSubjectTypeName()));
+                groupPrivilege = new GroupPrivilege();
+                Optional<Privilege> optionalPrivilege = privilegeRepository.findById(groupPrivilegeRequest.getPrivilegeId());
+                Group group = groupRepository.findOne(groupPrivilegeRequest.getGroupId());
+                SubjectType subjectType = null;
+                if (groupPrivilegeRequest.getSubjectTypeId() != null) {
+                    subjectType = subjectTypeRepository.findOne(groupPrivilegeRequest.getSubjectTypeId());
                 }
-                newGroupPrivilege.setUuid(groupPrivilege.getUuid());
-                newGroupPrivilege.setPrivilege(optionalPrivilege.get());
-                newGroupPrivilege.setGroup(group);
-                newGroupPrivilege.setSubjectType(subjectType);
-                newGroupPrivilege.setProgram(groupPrivilege.getProgramId().isPresent() ? programRepository.findOne(groupPrivilege.getProgramId().get()) : null);
-                newGroupPrivilege.setEncounterType(groupPrivilege.getEncounterTypeId().isPresent() ? encounterTypeRepository.findOne(groupPrivilege.getEncounterTypeId().get()) : null);
-                newGroupPrivilege.setProgramEncounterType(groupPrivilege.getProgramEncounterTypeId().isPresent() ? encounterTypeRepository.findOne(groupPrivilege.getProgramEncounterTypeId().get()) : null);
-                newGroupPrivilege.setChecklistDetail(groupPrivilege.getChecklistDetailId().isPresent() ? checklistDetailRepository.findOne(groupPrivilege.getChecklistDetailId().get()) : null);
-                newGroupPrivilege.setAllow(groupPrivilege.isAllow());
 
-                privilegesToBeAddedOrUpdated.add(newGroupPrivilege);
+                if (!optionalPrivilege.isPresent() || group == null) {
+                    return ResponseEntity.badRequest().body(String.format("Invalid privilege id %d or group id %d", groupPrivilegeRequest.getPrivilegeId(), groupPrivilegeRequest.getGroupId()));
+                }
+                groupPrivilege.setUuid(groupPrivilegeRequest.getUuid());
+                groupPrivilege.setPrivilege(optionalPrivilege.get());
+                groupPrivilege.setGroup(group);
+                groupPrivilege.setSubjectType(subjectType);
+                groupPrivilege.setProgram(groupPrivilegeRequest.getProgramId() != null ? programRepository.findOne(groupPrivilegeRequest.getProgramId()) : null);
+                groupPrivilege.setEncounterType(groupPrivilegeRequest.getEncounterTypeId() != null ? encounterTypeRepository.findOne(groupPrivilegeRequest.getEncounterTypeId()) : null);
+                groupPrivilege.setProgramEncounterType(groupPrivilegeRequest.getProgramEncounterTypeId() != null ? encounterTypeRepository.findOne(groupPrivilegeRequest.getProgramEncounterTypeId()) : null);
+                groupPrivilege.setChecklistDetail(groupPrivilegeRequest.getChecklistDetailId() != null ? checklistDetailRepository.findOne(groupPrivilegeRequest.getChecklistDetailId()) : null);
+                groupPrivilege.setAllow(groupPrivilegeRequest.isAllow());
+
+                privilegesToBeAddedOrUpdated.add(groupPrivilege);
             }
         }
 
-        return ResponseEntity.ok(groupPrivilegeRepository.saveAll(privilegesToBeAddedOrUpdated));
+        return ResponseEntity.ok(groupPrivilegeRepository.saveAllGroupPrivileges(privilegesToBeAddedOrUpdated));
     }
-
 }
